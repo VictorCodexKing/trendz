@@ -15,12 +15,17 @@ touching the scoring logic.
 
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass
 
 from trendz.agents.base import BaseAgent
+from trendz.concurrency import bounded_map
 from trendz.contracts import RunContext, Trend, TrendList
 from trendz.sources.base import TrendSource
+
+# Estimated external-API quota cost of a single source fetch. Real network
+# adapters can refine this later; it exists so the budget ledger is exercised on
+# the live path and the debit/guard idiom is established for cloned agents.
+QUOTA_PER_FETCH = 1
 
 
 @dataclass(frozen=True)
@@ -111,20 +116,47 @@ class TrendScout(BaseAgent[None, TrendList]):
         return result
 
     async def _gather(self, ctx: RunContext) -> list[Trend]:
-        """Fetch trends from all sources concurrently, tolerating empties."""
+        """Fetch trends from all sources, capped at the configured concurrency.
+
+        Fetching is routed through :func:`~trendz.concurrency.bounded_map` so the
+        head stage respects ``ctx.config.concurrency_degree`` just like the
+        downstream fan-out stages, rather than fanning out unbounded. Empty and
+        no-source cases yield an empty list without error.
+        """
         if not self._sources:
             return []
-        results = await asyncio.gather(*(source.fetch(ctx) for source in self._sources))
+        results = await bounded_map(
+            lambda source: self._fetch_source(ctx, source),
+            self._sources,
+            ctx.config.concurrency_degree,
+        )
         return [trend for batch in results for trend in batch]
+
+    async def _fetch_source(self, ctx: RunContext, source: TrendSource) -> list[Trend]:
+        """Fetch one source, checking and debiting the run's quota ledger.
+
+        This establishes the budget-guard idiom the design assigns to the run:
+        skip the fetch when the run has no quota left, otherwise debit the
+        estimated cost before doing the work. Downstream agents copy this shape
+        for their own external calls (see ``ctx.budget`` helpers).
+        """
+        if not ctx.budget.can_use_quota(QUOTA_PER_FETCH):
+            self.log.warning("quota_exhausted", source=source.name)
+            return []
+        ctx.budget.charge(calls=QUOTA_PER_FETCH)
+        return await source.fetch(ctx)
 
     @staticmethod
     def _matches_niche(trend: Trend, niche_filters: tuple[str, ...]) -> bool:
         """Return True if the trend matches the niche filters.
 
         Empty filters match everything. Otherwise a trend is kept when any
-        filter keyword appears (case-insensitively) in its title or source.
+        filter keyword appears (case-insensitively) in its title. Matching is
+        title-only on purpose: the ``source`` string is an infrastructure
+        identifier (for example "reddit" or "mock"), not topic content, so
+        keying niche selection off it would silently widen the filter.
         """
         if not niche_filters:
             return True
-        haystack = f"{trend.title} {trend.source}".lower()
+        haystack = trend.title.lower()
         return any(keyword.lower() in haystack for keyword in niche_filters)

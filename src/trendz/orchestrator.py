@@ -12,45 +12,20 @@ fan-out/concurrency model from the design are visible and ready to fill in.
 
 from __future__ import annotations
 
-import asyncio
 import uuid
-from collections.abc import Awaitable, Callable, Iterable
-from typing import TypeVar
 
 import structlog
 
 from trendz.agents.trend_scout import TrendScout
+from trendz.concurrency import bounded_map
 from trendz.contracts import RunConfig, RunContext, TrendList
 from trendz.sources.base import TrendSource
 
+# Re-exported so callers and downstream stages can reach the bounded worker pool
+# via the orchestrator, which owns the run-level concurrency model.
+__all__ = ["Orchestrator", "bounded_map"]
+
 log = structlog.get_logger(component="orchestrator")
-
-T = TypeVar("T")
-R = TypeVar("R")
-
-
-async def bounded_map(
-    func: Callable[[T], Awaitable[R]],
-    items: Iterable[T],
-    concurrency: int,
-) -> list[R]:
-    """Run ``func`` over ``items`` concurrently, capped at ``concurrency``.
-
-    This is the reusable bounded worker-pool helper the fan-out stages use
-    (Clip Factory over N briefs, Publisher over M platforms). An
-    ``asyncio.Semaphore`` limits how many coroutines run at once so the run
-    respects API rate limits and render/GPU budget. Results preserve input
-    order.
-    """
-    if concurrency < 1:
-        raise ValueError("concurrency must be >= 1")
-    semaphore = asyncio.Semaphore(concurrency)
-
-    async def _worker(item: T) -> R:
-        async with semaphore:
-            return await func(item)
-
-    return await asyncio.gather(*(_worker(item) for item in items))
 
 
 class Orchestrator:
@@ -90,8 +65,8 @@ class Orchestrator:
         # ------------------------------------------------------------------
         # TODO: downstream pipeline stages (see docs/DESIGN.md). Each stage is
         # an agent subclassing BaseAgent, threaded the same RunContext. The
-        # fan-out stages use ``bounded_map`` above to cap concurrency at
-        # ``self._config.concurrency_degree``.
+        # fan-out stages use ``bounded_map`` (from trendz.concurrency) to cap
+        # concurrency at ``self._config.concurrency_degree``.
         #
         #   briefs   = await ContentStrategist(...).run(ctx, trend_list)
         #              # -> list[ClipBrief]  (fan-out boundary: N briefs)

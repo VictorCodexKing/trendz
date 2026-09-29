@@ -40,7 +40,10 @@ class TrendSource(ABC):
         """Fetch raw, unscored trends from this source.
 
         Args:
-            ctx: The run context (for run-scoped config and budget checks).
+            ctx: The run context, for run-scoped config. The caller (Trend
+                Scout) is responsible for the budget/quota guard around this
+                call via ``ctx.budget``; a source does not debit the ledger
+                itself, though an adapter may read it to size its own request.
 
         Returns:
             A list of trends with their raw signals populated. Scoring and

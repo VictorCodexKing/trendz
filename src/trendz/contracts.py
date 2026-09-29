@@ -38,8 +38,8 @@ class RunConfig(BaseModel):
     niche_filters: tuple[str, ...] = Field(
         default_factory=tuple,
         description=(
-            "Case-insensitive keywords a trend must match (in its title or "
-            "source) to be kept. Empty means no filtering."
+            "Case-insensitive keywords a trend's title must match to be kept. "
+            "Empty means no filtering."
         ),
     )
     target_clip_count: int = Field(
