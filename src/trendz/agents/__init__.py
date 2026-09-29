@@ -7,9 +7,10 @@ and fan-out.
 
 Implemented so far:
     - Trend Scout (first agent, head of the pipeline) -- see ``trend_scout``.
+    - Content Strategist: turns trends into concrete clip briefs (fan-out
+      boundary) -- see ``content_strategist``.
 
 TODO: remaining agents to be added as their own modules under this package:
-    - Content Strategist: turns trends into concrete clip briefs (fan-out).
     - Clip Factory: one Clip Worker per brief; script/voice, visual, caption,
       assembly (concurrency core).
     - Quality & Safety Gate: automated per-clip technical/safety/engagement gate.

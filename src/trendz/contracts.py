@@ -16,6 +16,7 @@ Design choices:
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -178,3 +179,84 @@ class TrendList(BaseModel):
         if n < 0:
             raise ValueError("n must be non-negative")
         return self.trends[:n]
+
+
+# Short platform identifiers the Content Strategist targets. Each maps to a
+# canonical short-video surface; the strategist chooses aspect ratio and length
+# per platform. Kept as a Literal (not a free string) so a brief can only name a
+# platform the pipeline knows how to render and publish.
+Platform = Literal["tiktok", "reels", "shorts"]
+
+# Canonical short-video aspect ratios the Assembly step supports (per DESIGN.md
+# stage 3): vertical, square, and landscape.
+AspectRatio = Literal["9:16", "1:1", "16:9"]
+
+# Whether a clip's footage is sourced (stock/licensed B-roll) or AI-generated.
+# Modelled as a Literal enum rather than a bare bool so the design's "sourced vs
+# AI footage" decision reads explicitly at every call site and can grow a third
+# option (e.g. "hybrid") without a signature change.
+FootageKind = Literal["sourced", "ai"]
+
+
+class ClipBrief(BaseModel):
+    """A concrete, per-clip production brief emitted by the Content Strategist.
+
+    A brief is the fan-out unit into the Clip Factory: one brief becomes one
+    rendered clip. It captures the stage-2 creative decisions from DESIGN.md
+    (angle/hook, platform, format, target length, caption/CTA, hashtags, sourced
+    vs AI footage) and carries ``trend_id`` back to the originating
+    :class:`Trend` so the Performance Analyst can attribute outcomes to a trend.
+
+    Frozen because a brief is an immutable fact once planned: the Clip Factory
+    consumes it concurrently and must never mutate it.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    id: str
+    trend_id: str = Field(description="ID of the originating Trend, for attribution.")
+    title: str = Field(description="Human-readable title, derived from the trend.")
+    angle: str = Field(description="The creative angle/framing for the clip.")
+    hook: str = Field(description="The opening hook that stops the scroll.")
+    platform: Platform = Field(description="Target short-video platform.")
+    aspect_ratio: AspectRatio = Field(description="Frame aspect ratio for the platform.")
+    target_length_seconds: int = Field(
+        default=30,
+        ge=1,
+        le=180,
+        description="Intended clip length in seconds.",
+    )
+    caption: str = Field(description="Post caption/description copy.")
+    cta: str = Field(description="Call to action for the viewer.")
+    hashtags: tuple[str, ...] = Field(
+        default_factory=tuple,
+        description="Hashtags to publish with the clip (without leading '#').",
+    )
+    footage_kind: FootageKind = Field(
+        default="sourced",
+        description="Whether footage is sourced (stock) or AI-generated.",
+    )
+
+
+class ClipBriefList(BaseModel):
+    """An ordered collection of clip briefs for a run.
+
+    The Content Strategist returns this; it is the fan-out boundary the Clip
+    Factory maps a Clip Worker over. Mirrors :class:`TrendList`: frozen, with
+    ``__len__`` and a :meth:`top` helper for consumers that only need the first
+    N briefs.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    run_id: str
+    briefs: tuple[ClipBrief, ...] = Field(default_factory=tuple)
+
+    def __len__(self) -> int:
+        return len(self.briefs)
+
+    def top(self, n: int) -> tuple[ClipBrief, ...]:
+        """Return the first ``n`` briefs in order."""
+        if n < 0:
+            raise ValueError("n must be non-negative")
+        return self.briefs[:n]
