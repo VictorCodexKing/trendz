@@ -6,7 +6,7 @@ contract. The Orchestrator dispatches work between them and owns concurrency
 and fan-out.
 
 Implemented so far:
-    - Trend Scout (first agent, head of the pipeline) [arrives in FEAT-002]
+    - Trend Scout (first agent, head of the pipeline) -- see ``trend_scout``.
 
 TODO: remaining agents to be added as their own modules under this package:
     - Content Strategist: turns trends into concrete clip briefs (fan-out).
