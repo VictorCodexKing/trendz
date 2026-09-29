@@ -112,11 +112,19 @@ class ContentStrategist(BaseAgent[TrendList, ClipBriefList]):
             for platform in strategy.platforms:
                 emit ClipBrief(...)      # format/length from PLATFORM_FORMATS
 
-    Emission stops as soon as ``ctx.config.target_clip_count`` briefs exist, so
-    the total never exceeds the run's clip budget. Every brief carries the
-    originating ``trend_id`` for downstream attribution. Creative fields (angle,
-    hook, caption, CTA, hashtags) are derived mechanically from the trend title
-    and the strategy config; no LLM or network is involved.
+    Trends are admitted on **whole-trend boundaries**: a trend contributes its
+    full platform set or nothing at all. Planning stops before the first trend
+    whose complete platform set would overflow ``ctx.config.target_clip_count``,
+    so the total never exceeds the run's clip budget and no trend is ever left
+    with a partial platform set. (This is the cleaner Option A from the review:
+    an all-or-nothing per-trend cap, chosen over documenting a mid-trend
+    truncation skew, because downstream attribution and per-trend fairness are
+    easier to reason about when a trend's platform coverage is never partial.)
+
+    Every brief carries the originating ``trend_id`` for downstream attribution.
+    Creative fields (angle, hook, caption, CTA, hashtags) are derived
+    mechanically from the trend title and the strategy config; no LLM or network
+    is involved.
     """
 
     def __init__(self, strategy: StrategyConfig = DEFAULT_STRATEGY) -> None:
@@ -137,19 +145,35 @@ class ContentStrategist(BaseAgent[TrendList, ClipBriefList]):
         """Plan clip briefs from the incoming ``TrendList``.
 
         Produces at most ``ctx.config.target_clip_count`` briefs, one per
-        configured platform per trend in ranked order, stopping once the cap is
-        reached. An empty input (or a zero cap) yields an empty
+        configured platform per trend in ranked order. Trends are admitted on
+        whole-trend boundaries, so a trend never receives a partial platform
+        set: planning stops before the first trend whose full platform set would
+        exceed the cap. An empty input (or a zero cap) yields an empty
         ``ClipBriefList``.
+
+        Args:
+            ctx: The run context; ``ctx.config.target_clip_count`` bounds output.
+            payload: The ranked trends to plan from. Trend ids **must be unique**
+                because each brief id is minted as ``f"{trend.id}-{platform}"``
+                and ``brief_id``/``trend_id`` are the attribution keys used by
+                the downstream Quality Gate and Performance Analyst. Rather than
+                silently producing colliding ids, this precondition is enforced.
+
+        Raises:
+            ValueError: If ``payload`` contains duplicate trend ids.
         """
+        self._require_unique_trend_ids(payload)
+
         cap = ctx.config.target_clip_count
+        per_trend = len(self._strategy.platforms)
         briefs: list[ClipBrief] = []
 
         for trend in payload.trends:
-            if len(briefs) >= cap:
+            # Admit trends on whole-trend boundaries: only start a trend if its
+            # full platform set still fits under the cap (Option A).
+            if len(briefs) + per_trend > cap:
                 break
             for platform in self._strategy.platforms:
-                if len(briefs) >= cap:
-                    break
                 briefs.append(self._plan_brief(trend, platform))
 
         result = ClipBriefList(run_id=ctx.run_id, briefs=tuple(briefs))
@@ -161,6 +185,29 @@ class ContentStrategist(BaseAgent[TrendList, ClipBriefList]):
             platforms=list(self._strategy.platforms),
         )
         return result
+
+    @staticmethod
+    def _require_unique_trend_ids(payload: TrendList) -> None:
+        """Enforce the trend-id uniqueness precondition of the fan-out.
+
+        Brief ids are minted as ``f"{trend.id}-{platform}"`` and downstream
+        attribution keys off ``brief_id``/``trend_id``; duplicate trend ids would
+        mint colliding brief ids and corrupt that attribution. We fail fast with
+        a clear error rather than silently de-duplicating, so the upstream Trend
+        Scout is the single source of truth for trend identity.
+        """
+        seen: set[str] = set()
+        duplicates: list[str] = []
+        for trend in payload.trends:
+            if trend.id in seen:
+                duplicates.append(trend.id)
+            else:
+                seen.add(trend.id)
+        if duplicates:
+            raise ValueError(
+                "TrendList contains duplicate trend ids, which would mint "
+                f"colliding brief ids: {sorted(set(duplicates))}"
+            )
 
     def _plan_brief(self, trend: Trend, platform: Platform) -> ClipBrief:
         """Build one deterministic brief for a trend on a platform.

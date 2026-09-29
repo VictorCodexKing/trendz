@@ -5,11 +5,13 @@ The Orchestrator owns the run lifecycle: it builds a
 dispatches work to agents, and (eventually) enforces concurrency limits, retries,
 timeouts, and budget guards.
 
-Today it implements the first three stages: Trend Scout -> Content Strategist ->
-Clip Factory. The Clip Factory is the fan-out/concurrency core, mapping a Clip
-Worker over the briefs through ``bounded_map``. The remaining stages (4+) are
-present as clearly-marked TODO scaffolding so the module boundaries and the
-fan-out/concurrency model from the design are visible and ready to fill in.
+Today it implements the first four stages: Trend Scout -> Content Strategist ->
+Clip Factory -> Quality & Safety Gate. The Clip Factory is the fan-out/
+concurrency core, mapping a Clip Worker over the briefs through ``bounded_map``;
+the Quality Gate fans out the same way, one evaluation per clip. The remaining
+stages (5+) are present as clearly-marked TODO scaffolding so the module
+boundaries and the fan-out/concurrency model from the design are visible and
+ready to fill in.
 """
 
 from __future__ import annotations

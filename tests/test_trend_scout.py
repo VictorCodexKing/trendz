@@ -123,12 +123,17 @@ async def test_orchestrator_runs_pipeline_end_to_end() -> None:
 
     # The pipeline now yields the Quality & Safety Gate's report (stage 4 output).
     assert isinstance(result, QualityReport)
-    # With five trends and the default target_clip_count of 5, five briefs are
-    # planned, each becomes one rendered clip, and the deterministic stub checker
-    # approves them all.
-    assert len(result) == config.target_clip_count
+    # The Content Strategist admits trends on whole-trend boundaries: with three
+    # configured platforms and the default target_clip_count of 5, only the first
+    # trend's full platform set (3 briefs) fits under the cap (admitting a second
+    # would need 6). Each brief becomes one rendered clip, and the deterministic
+    # stub checker approves them all.
+    assert len(result) == 3
+    assert len(result) <= config.target_clip_count
     assert result.dropped == ()
     # Every approved clip carries attribution back to a brief and a trend.
     for clip in result.approved:
         assert clip.brief_id
         assert clip.trend_id
+    # Whole-trend admission: all approved clips belong to a single trend here.
+    assert len({clip.trend_id for clip in result.approved}) == 1
