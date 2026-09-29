@@ -58,9 +58,11 @@ def score_trend(trend: Trend, weights: ScoringWeights = DEFAULT_WEIGHTS) -> floa
               - w_sat * saturation
 
     Higher velocity, relevance, and shelf life raise the score; higher
-    saturation lowers it. All signals are in ``[0, 1]``, so the score is bounded
-    and comparable across trends and runs. The function is pure and
-    deterministic: the same trend always yields the same score.
+    saturation lowers it. All four signals are in ``[0, 1]``, but because
+    saturation is subtracted the composite score can be negative (a fully
+    saturated, otherwise-zero trend scores ``-w_sat``); scores are comparable
+    across trends and runs. The function is pure and deterministic: the same
+    trend always yields the same score.
     """
     return (
         weights.velocity * trend.velocity
@@ -138,7 +140,10 @@ class TrendScout(BaseAgent[None, TrendList]):
         This establishes the budget-guard idiom the design assigns to the run:
         skip the fetch when the run has no quota left, otherwise debit the
         estimated cost before doing the work. Downstream agents copy this shape
-        for their own external calls (see ``ctx.budget`` helpers).
+        for their own external calls (see ``ctx.budget`` helpers). A source
+        fetch spends API quota (``calls``) but no currency, so only quota is
+        debited here; the ``amount`` side of the ledger accrues at cost-bearing
+        steps such as render and publish.
         """
         if not ctx.budget.can_use_quota(QUOTA_PER_FETCH):
             self.log.warning("quota_exhausted", source=source.name)

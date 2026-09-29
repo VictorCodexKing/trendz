@@ -80,7 +80,7 @@ async def test_ordering_matches_relative_signals(ctx: RunContext) -> None:
 
 
 async def test_niche_filter_excludes_non_matching() -> None:
-    """Niche filters drop trends whose title/source does not match."""
+    """Niche filters drop trends whose title does not match."""
     config = RunConfig(niche_filters=("gaming",))
     ctx = RunContext.new(run_id="niche-run", config=config)
     scout = TrendScout([MockTrendSource()])
