@@ -1,0 +1,64 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "trendz"
+version = "0.1.0"
+description = "Autonomous multi-agent clip generation system."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Trendz" }]
+dependencies = [
+    # Typed data contracts shared between agents.
+    "pydantic>=2",
+    # Structured logging for per-agent observability.
+    "structlog>=24",
+    # Future runtime dependencies (documented here, added when the
+    # relevant agents are implemented in later features):
+    #   - LLM / agent framework (e.g. langgraph, crewai, or a custom client)
+    #   - Media assembly: ffmpeg-python (wraps FFmpeg)
+    #   - TTS / text-to-video / stock providers (SDKs, added per provider)
+    #   - State/memory: asyncpg or redis for the job store; a vector/metrics
+    #     store for the Learning module
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.5",
+    "black>=24",
+    "mypy>=1.10",
+]
+
+[project.urls]
+Design = "https://github.com/VictorCodexKing/trendz/blob/main/docs/DESIGN.md"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/trendz"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "W"]
+
+[tool.black]
+line-length = 100
+target-version = ["py310"]
+
+[tool.mypy]
+python_version = "3.10"
+disallow_untyped_defs = true
+ignore_missing_imports = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+files = ["src"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
