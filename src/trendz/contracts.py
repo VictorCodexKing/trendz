@@ -260,3 +260,67 @@ class ClipBriefList(BaseModel):
         if n < 0:
             raise ValueError("n must be non-negative")
         return self.briefs[:n]
+
+
+class RenderedClip(BaseModel):
+    """A single assembled clip produced by a Clip Worker in the Clip Factory.
+
+    One :class:`ClipBrief` becomes exactly one ``RenderedClip``. It carries the
+    stage-3 assembly output from DESIGN.md (stitched audio + video + captions,
+    formatted per platform aspect ratio) as stub media fields: the real Clip
+    Worker will populate these with paths to FFmpeg/TTS output, while the
+    deterministic offline worker fills them with mocked URIs. ``brief_id`` links
+    back to the originating brief and ``trend_id`` carries attribution through so
+    the Performance Analyst can trace an outcome all the way back to its trend.
+
+    Frozen because a rendered clip is an immutable fact once assembled: the
+    Quality Gate and downstream stages consume it concurrently and must never
+    mutate it.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    id: str
+    brief_id: str = Field(description="ID of the originating ClipBrief.")
+    trend_id: str = Field(description="ID of the originating Trend, for attribution.")
+    platform: Platform = Field(description="Target short-video platform.")
+    aspect_ratio: AspectRatio = Field(description="Frame aspect ratio for the platform.")
+    duration_seconds: int = Field(
+        ge=1,
+        le=180,
+        description="Actual assembled clip duration in seconds.",
+    )
+    video_uri: str = Field(description="URI/path to the assembled video (stubbed offline).")
+    has_audio: bool = Field(
+        default=True,
+        description="Whether a voice/audio track was assembled (script + TTS marker).",
+    )
+    has_captions: bool = Field(
+        default=True,
+        description="Whether burned-in captions/subtitles were assembled.",
+    )
+
+
+class RenderedClipSet(BaseModel):
+    """An ordered collection of rendered clips for a run.
+
+    The Clip Factory returns this after fanning a Clip Worker out over the
+    briefs. Mirrors :class:`ClipBriefList`/:class:`TrendList`: frozen, with
+    ``__len__`` and a :meth:`top` helper for consumers that only need the first
+    N clips. Order mirrors the input ``ClipBriefList`` because the fan-out routes
+    through :func:`~trendz.concurrency.bounded_map`, which preserves input order.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    run_id: str
+    clips: tuple[RenderedClip, ...] = Field(default_factory=tuple)
+
+    def __len__(self) -> int:
+        return len(self.clips)
+
+    def top(self, n: int) -> tuple[RenderedClip, ...]:
+        """Return the first ``n`` clips in order."""
+        if n < 0:
+            raise ValueError("n must be non-negative")
+        return self.clips[:n]

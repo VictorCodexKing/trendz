@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from trendz.agents.trend_scout import TrendScout, score_trend
-from trendz.contracts import RunConfig, RunContext, Trend, TrendList
+from trendz.contracts import RenderedClipSet, RunConfig, RunContext, Trend, TrendList
 from trendz.orchestrator import Orchestrator
 from trendz.sources.mock_source import MockTrendSource
 
@@ -114,14 +114,19 @@ async def test_no_sources_yields_empty_trend_list(ctx: RunContext) -> None:
     assert len(result) == 0
 
 
-async def test_orchestrator_runs_trend_scout_end_to_end() -> None:
-    """The Orchestrator stub run() executes the Trend Scout stage."""
+async def test_orchestrator_runs_pipeline_end_to_end() -> None:
+    """The Orchestrator run() drives Trend Scout -> Content Strategist -> Clip Factory."""
     config = RunConfig()
     orchestrator = Orchestrator(config=config, sources=[MockTrendSource()])
 
     result = await orchestrator.run()
 
-    assert isinstance(result, TrendList)
-    assert len(result) == 5
-    scores = [t.score for t in result.trends]
-    assert scores == sorted(scores, reverse=True)
+    # The pipeline now yields rendered clips (stage 3 output), not a TrendList.
+    assert isinstance(result, RenderedClipSet)
+    # With five trends and the default target_clip_count of 5, five briefs are
+    # planned and each becomes one rendered clip.
+    assert len(result) == config.target_clip_count
+    # Every clip carries attribution back to a brief and a trend.
+    for clip in result.clips:
+        assert clip.brief_id
+        assert clip.trend_id
