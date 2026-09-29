@@ -20,9 +20,10 @@ import structlog
 
 from trendz.agents.clip_factory import ClipFactory
 from trendz.agents.content_strategist import ContentStrategist
+from trendz.agents.quality_gate import QualityGate
 from trendz.agents.trend_scout import TrendScout
 from trendz.concurrency import bounded_map
-from trendz.contracts import RenderedClipSet, RunConfig, RunContext
+from trendz.contracts import QualityReport, RunConfig, RunContext
 from trendz.sources.base import TrendSource
 
 # Re-exported so callers and downstream stages can reach the bounded worker pool
@@ -35,9 +36,9 @@ log = structlog.get_logger(component="orchestrator")
 class Orchestrator:
     """Builds the run context and drives the pipeline stages.
 
-    Stages 1-3 (Trend Scout, Content Strategist, Clip Factory) are wired up and
-    threaded the same ``RunContext``. Downstream stages are stubbed below with
-    the intended data flow and fan-out points documented.
+    Stages 1-4 (Trend Scout, Content Strategist, Clip Factory, Quality & Safety
+    Gate) are wired up and threaded the same ``RunContext``. Downstream stages
+    are stubbed below with the intended data flow and fan-out points documented.
     """
 
     def __init__(self, config: RunConfig, sources: list[TrendSource]) -> None:
@@ -46,17 +47,21 @@ class Orchestrator:
         self._trend_scout = TrendScout(sources)
         self._content_strategist = ContentStrategist()
         self._clip_factory = ClipFactory()
+        # The gate re-uses the Clip Factory render path to re-render rejected
+        # clips on bounded retry, so it shares the same factory instance.
+        self._quality_gate = QualityGate(clip_factory=self._clip_factory)
 
     def _new_context(self) -> RunContext:
         """Create a fresh run context with a unique run id."""
         return RunContext.new(run_id=str(uuid.uuid4()), config=self._config)
 
-    async def run(self) -> RenderedClipSet:
+    async def run(self) -> QualityReport:
         """Execute the pipeline.
 
-        Today this runs stages 1-3 and returns the Clip Factory's
-        ``RenderedClipSet``. As downstream agents land, each stage below is
-        unstubbed and chained on, threading the same ``RunContext`` through.
+        Today this runs stages 1-4 and returns the Quality & Safety Gate's
+        ``QualityReport`` (approved clips plus dropped verdicts). As downstream
+        agents land, each stage below is unstubbed and chained on, threading the
+        same ``RunContext`` through.
         """
         ctx = self._new_context()
         log.info("run_start", run_id=ctx.run_id, target_clips=self._config.target_clip_count)
@@ -87,17 +92,28 @@ class Orchestrator:
             clip_count=len(clips),
         )
 
+        # Stage 4: Quality & Safety Gate -> QualityReport. Embarrassingly
+        # parallel: one evaluation task per clip through ``bounded_map`` capped
+        # at ``self._config.concurrency_degree``. Approved clips flow on toward
+        # the Scheduler; rejected clips are re-rendered via the Clip Factory for
+        # bounded retries and, if still failing, dropped-and-logged (never
+        # raised). ``briefs`` is threaded in so the gate can re-render on retry.
+        report = await self._quality_gate.run(ctx, clips, briefs=briefs)
+        log.info(
+            "quality_gate_done",
+            run_id=ctx.run_id,
+            approved_count=len(report.approved),
+            dropped_count=len(report.dropped),
+        )
+
         # ------------------------------------------------------------------
         # TODO: remaining pipeline stages (see docs/DESIGN.md). Each stage is an
         # agent subclassing BaseAgent, threaded the same RunContext. The fan-out
         # stages use ``bounded_map`` (from trendz.concurrency) to cap concurrency
-        # at ``self._config.concurrency_degree``.
+        # at ``self._config.concurrency_degree``. The Scheduler consumes the
+        # gate's approved output (``report.approved``).
         #
-        #   approved = await bounded_map(
-        #                  lambda c: QualityGate(...).run(ctx, c),
-        #                  clips.clips, self._config.concurrency_degree,
-        #              )                       # approved -> Scheduler; rejected retry/drop
-        #   plan     = await Scheduler(...).run(ctx, approved)   # -> PublishPlan
+        #   plan     = await Scheduler(...).run(ctx, report.approved)  # -> PublishPlan
         #   results  = await bounded_map(
         #                  lambda slice_: Publisher(...).run(ctx, slice_),
         #                  plan.platform_slices, self._config.concurrency_degree,
@@ -111,5 +127,10 @@ class Orchestrator:
         # permanently failed jobs.
         # ------------------------------------------------------------------
 
-        log.info("run_complete", run_id=ctx.run_id, clip_count=len(clips))
-        return clips
+        log.info(
+            "run_complete",
+            run_id=ctx.run_id,
+            approved_count=len(report.approved),
+            dropped_count=len(report.dropped),
+        )
+        return report

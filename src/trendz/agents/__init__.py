@@ -11,9 +11,11 @@ Implemented so far:
       boundary) -- see ``content_strategist``.
     - Clip Factory: one Clip Worker per brief; script/voice, visual, caption,
       assembly (concurrency core) -- see ``clip_factory``.
+    - Quality & Safety Gate: per-clip technical/safety/engagement gate; approves,
+      re-renders rejected clips for bounded retries, or drops-and-logs
+      (embarrassingly parallel) -- see ``quality_gate``.
 
 TODO: remaining agents to be added as their own modules under this package:
-    - Quality & Safety Gate: automated per-clip technical/safety/engagement gate.
     - Scheduler & Optimizer: decides when and where each clip posts.
     - Publisher: one Platform Publisher per platform (fan-out per platform).
     - Performance Analyst: collects post metrics and attributes outcomes.

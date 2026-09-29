@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from trendz.agents.trend_scout import TrendScout, score_trend
-from trendz.contracts import RenderedClipSet, RunConfig, RunContext, Trend, TrendList
+from trendz.contracts import QualityReport, RunConfig, RunContext, Trend, TrendList
 from trendz.orchestrator import Orchestrator
 from trendz.sources.mock_source import MockTrendSource
 
@@ -115,18 +115,20 @@ async def test_no_sources_yields_empty_trend_list(ctx: RunContext) -> None:
 
 
 async def test_orchestrator_runs_pipeline_end_to_end() -> None:
-    """The Orchestrator run() drives Trend Scout -> Content Strategist -> Clip Factory."""
+    """The Orchestrator run() drives Trend Scout -> ... -> Quality & Safety Gate."""
     config = RunConfig()
     orchestrator = Orchestrator(config=config, sources=[MockTrendSource()])
 
     result = await orchestrator.run()
 
-    # The pipeline now yields rendered clips (stage 3 output), not a TrendList.
-    assert isinstance(result, RenderedClipSet)
+    # The pipeline now yields the Quality & Safety Gate's report (stage 4 output).
+    assert isinstance(result, QualityReport)
     # With five trends and the default target_clip_count of 5, five briefs are
-    # planned and each becomes one rendered clip.
+    # planned, each becomes one rendered clip, and the deterministic stub checker
+    # approves them all.
     assert len(result) == config.target_clip_count
-    # Every clip carries attribution back to a brief and a trend.
-    for clip in result.clips:
+    assert result.dropped == ()
+    # Every approved clip carries attribution back to a brief and a trend.
+    for clip in result.approved:
         assert clip.brief_id
         assert clip.trend_id
