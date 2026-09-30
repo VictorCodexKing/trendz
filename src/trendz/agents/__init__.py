@@ -17,9 +17,15 @@ Implemented so far:
     - Scheduler & Optimizer: consumes the Quality Gate's approved clips and
       emits a per-platform PublishPlan (deterministic timing, spacing, and A/B
       variants), the stage-6 Publisher fan-out boundary -- see ``scheduler``.
+    - Publisher: one Platform Publisher per platform (fan-out per platform);
+      publishes each platform's slice through an injected publisher-client with
+      a stable idempotency key (no double-post) and records failures without
+      raising (record-and-continue) into a PostResults -- see ``publisher``.
+    - Performance Analyst: collects each succeeded post's metrics via an injected
+      offline metrics-provider (fan-out per post), derives a per-post
+      performance score, attributes outcomes back to trend/brief/clip, and emits
+      a PerformanceReports -- see ``performance_analyst``.
 
 TODO: remaining agents to be added as their own modules under this package:
-    - Publisher: one Platform Publisher per platform (fan-out per platform).
-    - Performance Analyst: collects post metrics and attributes outcomes.
     - Learning / Memory Store: self-improvement feedback loop and shared memory.
 """

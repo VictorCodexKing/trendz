@@ -38,9 +38,10 @@ from trendz.contracts import (
 # Learning Store can retune lengths from performance without touching the
 # planning loop.
 PLATFORM_FORMATS: dict[Platform, tuple[AspectRatio, int]] = {
+    "youtube_shorts": ("9:16", 45),
+    "instagram": ("9:16", 30),
     "tiktok": ("9:16", 30),
-    "reels": ("9:16", 30),
-    "shorts": ("9:16", 45),
+    "facebook": ("9:16", 30),
 }
 
 
@@ -63,7 +64,7 @@ class StrategyConfig:
             title, keeping captions tidy and output deterministic.
     """
 
-    platforms: tuple[Platform, ...] = ("tiktok", "reels", "shorts")
+    platforms: tuple[Platform, ...] = ("youtube_shorts", "instagram", "tiktok", "facebook")
     default_hashtags: tuple[str, ...] = ("fyp", "trending")
     footage_kind: FootageKind = "sourced"
     max_derived_hashtags: int = 3

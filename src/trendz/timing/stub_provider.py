@@ -23,12 +23,14 @@ from trendz.timing.base import AudienceTimingProvider
 # Scheduler's grouping and ordering are easy to reason about offline. The first
 # slot in each tuple is that platform's single best posting window.
 _DEFAULT_SLOTS: dict[Platform, tuple[int, ...]] = {
+    # 15:00 and 20:00 UTC.
+    "youtube_shorts": (15 * 60, 20 * 60),
+    # 11:00 and 19:00 UTC.
+    "instagram": (11 * 60, 19 * 60),
     # 18:00 and 12:00 UTC.
     "tiktok": (18 * 60, 12 * 60),
-    # 11:00 and 19:00 UTC.
-    "reels": (11 * 60, 19 * 60),
-    # 15:00 and 20:00 UTC.
-    "shorts": (15 * 60, 20 * 60),
+    # 13:00 and 21:00 UTC.
+    "facebook": (13 * 60, 21 * 60),
 }
 
 # Fallback slot used when a platform has no configured hint (defensive: the

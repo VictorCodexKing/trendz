@@ -92,6 +92,17 @@ class RunConfig(BaseModel):
             "variations and incrementing variant indices."
         ),
     )
+    dwell_hours: int = Field(
+        default=48,
+        ge=0,
+        description=(
+            "Dwell period, in hours, after a post is published before the "
+            "Performance Analyst collects its metrics. Applied deterministically "
+            "as 'metrics collected as of published_at + dwell_hours' - it is a "
+            "modelled collection offset, NOT a real sleep or wall-clock wait. "
+            "0 means metrics are collected as of the publish time itself."
+        ),
+    )
 
 
 class BudgetLedger(BaseModel):
@@ -211,10 +222,11 @@ class TrendList(BaseModel):
 
 
 # Short platform identifiers the Content Strategist targets. Each maps to a
-# canonical short-video surface; the strategist chooses aspect ratio and length
-# per platform. Kept as a Literal (not a free string) so a brief can only name a
-# platform the pipeline knows how to render and publish.
-Platform = Literal["tiktok", "reels", "shorts"]
+# canonical short-video surface (YouTube Shorts, Instagram, TikTok, Facebook);
+# the strategist chooses aspect ratio and length per platform. Kept as a Literal
+# (not a free string) so a brief can only name a platform the pipeline knows how
+# to render and publish.
+Platform = Literal["youtube_shorts", "instagram", "tiktok", "facebook"]
 
 # Canonical short-video aspect ratios the Assembly step supports (per DESIGN.md
 # stage 3): vertical, square, and landscape.
@@ -535,3 +547,269 @@ class PublishPlan(BaseModel):
         as :attr:`platforms`.
         """
         return tuple((platform, self.for_platform(platform)) for platform in self.platforms)
+
+
+class PostResult(BaseModel):
+    """The outcome of publishing a single :class:`ScheduledPost` (stage 6).
+
+    Produced by the Publisher for one scheduled post. It mirrors
+    :class:`ScheduledPost`'s attribution linkage -
+    ``clip_id``/``brief_id``/``trend_id`` plus ``platform`` and ``variant`` - so
+    a published (or failed) post can be traced all the way back to its clip,
+    brief, and originating trend by the future Performance Analyst / Learning
+    Store. It also carries the :attr:`idempotency_key` the Publisher derived for
+    this post, which the publisher-client uses to guarantee a post is not
+    published twice within a run.
+
+    On success :attr:`succeeded` is ``True`` and :attr:`post_id`,
+    :attr:`post_url`, and :attr:`published_at` (aware UTC) are set while
+    :attr:`error` is ``None``. On failure :attr:`succeeded` is ``False``,
+    :attr:`error` records the reason, and the success fields are ``None`` - the
+    Publisher records the failure and continues (one bad post never blocks the
+    run).
+
+    Frozen because a result is an immutable fact once recorded: results are
+    collected across concurrent per-platform publishers and must never be
+    mutated in place.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    clip_id: str = Field(description="ID of the published RenderedClip.")
+    brief_id: str = Field(description="ID of the originating ClipBrief.")
+    trend_id: str = Field(description="ID of the originating Trend, for attribution.")
+    platform: Platform = Field(description="Target short-video platform.")
+    variant: int = Field(
+        default=0,
+        ge=0,
+        description="Index of the A/B caption/hashtag variant (mirrors ScheduledPost.variant).",
+    )
+    idempotency_key: str = Field(
+        description="Stable key the Publisher derived for this post to prevent double-posting."
+    )
+    succeeded: bool = Field(description="Whether the post was published successfully.")
+    post_id: str | None = Field(
+        default=None,
+        description="Platform post id assigned on success; None on failure.",
+    )
+    post_url: str | None = Field(
+        default=None,
+        description="Platform post URL assigned on success; None on failure.",
+    )
+    error: str | None = Field(
+        default=None,
+        description="Failure reason; None on success.",
+    )
+    published_at: datetime | None = Field(
+        default=None,
+        description="Aware UTC time the post was published; None on failure.",
+    )
+
+
+class PostResults(BaseModel):
+    """The Publisher's output: the outcome of every scheduled post (stage 6).
+
+    Returned by the Publisher after it fans the run's :class:`PublishPlan` out
+    per platform (one Platform Publisher per platform, concurrent) and publishes
+    each platform's slice through the injected publisher-client. ``results``
+    holds every :class:`PostResult` in a single deterministic global order
+    (grouped by sorted platform, then scheduled order within a platform), so a
+    run is reproducible.
+
+    Mirrors :class:`PublishPlan`/:class:`QualityReport`: frozen, with ``__len__``
+    over the results and the same per-platform helpers (:attr:`platforms`,
+    :meth:`for_platform`, :meth:`slices`) so per-platform success/failure is
+    trivially inspectable. :attr:`succeeded`/:attr:`failed` split the results by
+    outcome, and :meth:`top` mirrors the other containers.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    run_id: str
+    results: tuple[PostResult, ...] = Field(default_factory=tuple)
+
+    def __len__(self) -> int:
+        return len(self.results)
+
+    @property
+    def platforms(self) -> tuple[Platform, ...]:
+        """Return the sorted tuple of distinct platforms present (deterministic)."""
+        return tuple(sorted({result.platform for result in self.results}))
+
+    def for_platform(self, platform: Platform) -> tuple[PostResult, ...]:
+        """Return ``platform``'s results in the deterministic global order.
+
+        Results are already stored grouped by sorted platform then scheduled
+        order, so filtering preserves that stable order.
+        """
+        return tuple(result for result in self.results if result.platform == platform)
+
+    def slices(self) -> tuple[tuple[Platform, tuple[PostResult, ...]], ...]:
+        """Return one ``(platform, results)`` pair per platform in sorted order.
+
+        Mirrors :meth:`PublishPlan.slices`: each pair carries a platform and its
+        results in the same deterministic order as :attr:`platforms`.
+        """
+        return tuple((platform, self.for_platform(platform)) for platform in self.platforms)
+
+    @property
+    def succeeded(self) -> tuple[PostResult, ...]:
+        """Return the results that published successfully, in global order."""
+        return tuple(result for result in self.results if result.succeeded)
+
+    @property
+    def failed(self) -> tuple[PostResult, ...]:
+        """Return the results that failed to publish, in global order."""
+        return tuple(result for result in self.results if not result.succeeded)
+
+    def top(self, n: int) -> tuple[PostResult, ...]:
+        """Return the first ``n`` results in the deterministic global order."""
+        if n < 0:
+            raise ValueError("n must be non-negative")
+        return self.results[:n]
+
+
+class PostMetrics(BaseModel):
+    """The raw engagement stats a real analytics API returns for one post (stage 7).
+
+    This is the raw payload the Performance Analyst collects for a successfully
+    published post, mirroring what a real per-platform analytics API would report
+    (views, watch time, and the reaction/share/comment/follow signals). The
+    Analyst derives a :attr:`PostPerformance.performance_score` from these.
+
+    Frozen because a metrics snapshot is an immutable fact once collected: it is
+    a point-in-time reading (as of the deterministic dwell-based collection time)
+    and must never be mutated in place.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    views: int = Field(ge=0, description="Total views the post accumulated.")
+    watch_time_seconds: float = Field(
+        ge=0.0,
+        description="Total watch time across all views, in seconds.",
+    )
+    likes: int = Field(ge=0, description="Number of likes/reactions.")
+    shares: int = Field(ge=0, description="Number of shares/reposts.")
+    comments: int = Field(ge=0, description="Number of comments.")
+    follows: int = Field(ge=0, description="New follows attributed to the post.")
+
+
+class PostPerformance(BaseModel):
+    """The Performance Analyst's per-post record: metrics + score + attribution.
+
+    Produced by the Analyst for one successfully published :class:`PostResult`,
+    this pairs the collected :class:`PostMetrics` with a derived
+    :attr:`performance_score` and carries the full attribution linkage -
+    ``clip_id``/``brief_id``/``trend_id`` plus ``platform`` and ``variant`` -
+    that flows through the whole pipeline, so an outcome can be traced back to
+    its clip, brief, and originating trend by the Learning Store. ``post_id`` is
+    the platform id of the published post the metrics were collected for.
+
+    :attr:`collected_at` records the aware-UTC time the metrics were collected,
+    modelled deterministically as ``published_at + dwell_hours`` (see
+    :attr:`RunConfig.dwell_hours`) - a collection offset, not a real wait.
+
+    Frozen because a performance record is an immutable fact once derived: the
+    Analyst collects records across concurrent tasks and must never mutate them.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    clip_id: str = Field(description="ID of the published RenderedClip.")
+    brief_id: str = Field(description="ID of the originating ClipBrief.")
+    trend_id: str = Field(description="ID of the originating Trend, for attribution.")
+    platform: Platform = Field(description="Target short-video platform.")
+    variant: int = Field(
+        default=0,
+        ge=0,
+        description="Index of the A/B caption/hashtag variant (mirrors PostResult.variant).",
+    )
+    post_id: str = Field(description="Platform post id the metrics were collected for.")
+    metrics: PostMetrics = Field(description="Raw engagement stats collected for the post.")
+    performance_score: float = Field(
+        ge=0.0,
+        description="Derived composite performance score for the post.",
+    )
+    collected_at: datetime = Field(
+        description=(
+            "Aware UTC time the metrics were collected, modelled deterministically "
+            "as published_at + RunConfig.dwell_hours (a collection offset, not a wait)."
+        ),
+    )
+
+
+class PerformanceReports(BaseModel):
+    """The Performance Analyst's output: a performance record per published post (stage 7).
+
+    Returned by the Analyst after it collects metrics for every successfully
+    published :class:`PostResult` (fanning the injected
+    :class:`~trendz.analytics.base.MetricsProvider` out through
+    :func:`~trendz.concurrency.bounded_map`) and derives a per-post score.
+    ``reports`` holds every :class:`PostPerformance` in a single deterministic
+    global order (mirroring the upstream :class:`PostResults` order), so a run is
+    reproducible.
+
+    Mirrors :class:`PostResults`: frozen, with ``__len__`` over the reports and
+    the same per-platform helpers (:attr:`platforms`, :meth:`for_platform`,
+    :meth:`slices`) plus :meth:`top`. It adds :meth:`by_trend`, the attribution
+    helper the Learning Store keys off, grouping reports by originating trend.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    run_id: str
+    reports: tuple[PostPerformance, ...] = Field(default_factory=tuple)
+
+    def __len__(self) -> int:
+        return len(self.reports)
+
+    @property
+    def platforms(self) -> tuple[Platform, ...]:
+        """Return the sorted tuple of distinct platforms present (deterministic)."""
+        return tuple(sorted({report.platform for report in self.reports}))
+
+    def for_platform(self, platform: Platform) -> tuple[PostPerformance, ...]:
+        """Return ``platform``'s reports in the deterministic global order.
+
+        Reports are stored in the upstream global order, so filtering preserves
+        that stable order.
+        """
+        return tuple(report for report in self.reports if report.platform == platform)
+
+    def slices(self) -> tuple[tuple[Platform, tuple[PostPerformance, ...]], ...]:
+        """Return one ``(platform, reports)`` pair per platform in sorted order.
+
+        Mirrors :meth:`PostResults.slices`: each pair carries a platform and its
+        reports in the same deterministic order as :attr:`platforms`.
+        """
+        return tuple((platform, self.for_platform(platform)) for platform in self.platforms)
+
+    def by_trend(self) -> tuple[tuple[str, tuple[PostPerformance, ...]], ...]:
+        """Return one ``(trend_id, reports)`` pair per trend in sorted trend order.
+
+        The attribution helper the Learning Store keys off: reports are grouped
+        by their originating ``trend_id`` (trends in sorted order), with each
+        group's reports left in the deterministic global order. This makes it
+        trivial to attribute per-post outcomes back to the trend that spawned
+        them.
+        """
+        trend_ids = tuple(sorted({report.trend_id for report in self.reports}))
+        return tuple(
+            (trend_id, tuple(r for r in self.reports if r.trend_id == trend_id))
+            for trend_id in trend_ids
+        )
+
+    def top(self, n: int) -> tuple[PostPerformance, ...]:
+        """Return the ``n`` highest-scoring reports, ranked by ``performance_score``.
+
+        Unlike :meth:`PostResults.top` (which has no intrinsic ranking), reports
+        carry a :attr:`PostPerformance.performance_score`, so ``top`` ranks by
+        it descending - the same "top means best" meaning :meth:`TrendResults.top`
+        carries. Ties break on the deterministic global order (Python's sort is
+        stable), so two runs over the same input yield the same ordering.
+        """
+        if n < 0:
+            raise ValueError("n must be non-negative")
+        ranked = sorted(self.reports, key=lambda report: report.performance_score, reverse=True)
+        return tuple(ranked[:n])
