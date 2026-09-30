@@ -11,6 +11,7 @@ from trendz.agents.content_strategist import ContentStrategist
 from trendz.agents.quality_gate import QualityGate
 from trendz.agents.scheduler import Scheduler
 from trendz.agents.trend_scout import ScoringWeights, TrendScout
+from trendz.checkers.stub_checker import StubClipChecker
 from trendz.concurrency import bounded_map
 from trendz.contracts import (
     LearningState,
@@ -212,3 +213,9 @@ async def test_orchestrator_feedback_path_maps_learnings_into_next_run_configs()
     ctx = RunContext.new(run_id="feedback-test", config=config)
     for platform, slots in learned_slots.items():
         assert scheduler._provider.optimal_minutes_of_day(ctx, platform) == slots
+
+    # The Quality Gate's checker is seeded with the learned engagement threshold
+    # on its REAL engagement gate (min_engagement_score), not the duration floor.
+    checker = quality_gate._checker
+    assert isinstance(checker, StubClipChecker)
+    assert checker._min_engagement_score == learnings.engagement_threshold

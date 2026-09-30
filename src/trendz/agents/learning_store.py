@@ -64,6 +64,15 @@ DEFAULT_NAMESPACE = "trendz:learning"
 # stub metrics-provider's plausible score range so rewards spread across [0, 1).
 _REWARD_HALF_SATURATION = 5000.0
 
+# Fixed learning rate for the bandit arm-estimate EMA. Deliberately SEPARATE
+# from ``ctx.config.learning_rate`` (which tunes the priors/threshold): the arm
+# estimate is the bandit's own value estimate, and keeping its update rate a
+# named module constant makes the bandit's convergence rate explicit and
+# independent of the prior-tuning knob rather than a hidden literal. 0.5 weights
+# each run's observation and the running estimate equally. Change this constant
+# (not the config knob) to retune how fast the bandit's arm values move.
+_ARM_ESTIMATE_LEARNING_RATE = 0.5
+
 
 def _normalize_reward(mean_score: float) -> float:
     """Squash a mean performance score into ``[0, 1)`` deterministically.
@@ -202,6 +211,48 @@ class LearningStore(BaseAgent[PerformanceReports, LearningState]):
                 updated[platform] = old
         return updated
 
+    def _update_timing_slots(
+        self,
+        prior: dict[Platform, tuple[int, ...]],
+        platform_rewards: dict[Platform, float],
+        learning_rate: float,
+    ) -> dict[Platform, tuple[int, ...]]:
+        """Deterministically re-rank each platform's timing slots from its reward.
+
+        The audience-timing provider treats a platform's slot tuple as its
+        posting windows in PREFERENCE order (the first slot is the single best
+        window). We genuinely learn "best post times" (DESIGN.md stage 8) by
+        REORDERING each observed platform's slots so that a stronger measured
+        reward promotes a later-listed window to the front - the higher the
+        normalized reward, the further into the tuple the preferred slot is
+        drawn, then rotated to lead. This is a pure, deterministic function of
+        the observed per-platform reward (no clock, network, or randomness): the
+        same reward always yields the same ordering, and a different reward
+        yields a different lead slot, so the hints genuinely respond to
+        performance rather than being a static pass-through.
+
+        The ``learning_rate`` gates responsiveness: a rate of 0 leaves the slots
+        untouched (priors never move), matching the reinforcement-update
+        semantics used elsewhere. Platforms with no observation this run, and
+        slot tuples too short to reorder (fewer than two slots), keep their prior
+        ordering unchanged. Keys are the union of the prior's platforms and the
+        observed platforms, emitted in sorted order for determinism.
+        """
+        platforms = sorted(set(prior) | set(platform_rewards))
+        updated: dict[Platform, tuple[int, ...]] = {}
+        for platform in platforms:
+            slots = prior.get(platform, ())
+            if learning_rate <= 0.0 or platform not in platform_rewards or len(slots) < 2:
+                updated[platform] = slots
+                continue
+            reward = _normalize_reward(platform_rewards[platform])
+            # Map the normalized reward in [0, 1) to a slot index in
+            # [0, len(slots)); higher reward promotes a later window to lead.
+            # int() floors, and reward < 1.0 keeps the index in range.
+            lead = int(reward * len(slots))
+            updated[platform] = slots[lead:] + slots[:lead]
+        return updated
+
     def _update_scoring_weights(
         self,
         prior: tuple[float, float, float, float],
@@ -258,9 +309,10 @@ class LearningStore(BaseAgent[PerformanceReports, LearningState]):
             pulls[platform] = existing.pulls if existing else 0
             if platform in platform_rewards:
                 reward = _normalize_reward(platform_rewards[platform])
-                # A fixed exploration/estimate learning rate keeps the arm update
-                # deterministic and independent of the prior config knob.
-                estimates[platform] = _ema(old_estimate, reward, 0.5)
+                # A fixed, named estimate learning rate keeps the arm update
+                # deterministic and explicitly independent of the prior config
+                # knob (see _ARM_ESTIMATE_LEARNING_RATE).
+                estimates[platform] = _ema(old_estimate, reward, _ARM_ESTIMATE_LEARNING_RATE)
             else:
                 estimates[platform] = old_estimate
 
@@ -288,8 +340,9 @@ class LearningStore(BaseAgent[PerformanceReports, LearningState]):
 
         Loads the prior state from the store, aggregates the reports per trend
         and per platform, applies the deterministic fixed-learning-rate
-        reinforcement update to the scoring weights, format priors, engagement
-        threshold, and timing hints, runs the seeded epsilon-greedy bandit
+        reinforcement update to the scoring weights, format priors, and engagement
+        threshold, deterministically re-ranks each platform's timing slots from
+        its observed reward, runs the seeded epsilon-greedy bandit
         allocation over the platform arms, then persists and returns the new
         state with an incremented version.
 
@@ -333,6 +386,9 @@ class LearningStore(BaseAgent[PerformanceReports, LearningState]):
             dict(prior.format_priors), platform_rewards, learning_rate
         )
         engagement_threshold = _ema(prior.engagement_threshold, overall_reward, learning_rate)
+        timing_slots = self._update_timing_slots(
+            dict(prior.timing_slots), platform_rewards, learning_rate
+        )
         arms = self._run_bandit(
             prior.arms, platform_rewards, _seed_from_run_id(ctx.run_id), epsilon
         )
@@ -344,7 +400,7 @@ class LearningStore(BaseAgent[PerformanceReports, LearningState]):
             scoring_weights=scoring_weights,
             format_priors=format_priors,
             engagement_threshold=engagement_threshold,
-            timing_slots=dict(prior.timing_slots),
+            timing_slots=timing_slots,
             arms=arms,
             trend_aggregates=trend_aggregates,
         )

@@ -267,7 +267,9 @@ class Orchestrator:
               and reported in ``__main__``.
             - The Quality Gate's checker is rebuilt with the learned engagement
               threshold mapped onto the
-              :class:`~trendz.checkers.stub_checker.StubClipChecker`.
+              :class:`~trendz.checkers.stub_checker.StubClipChecker`'s
+              ``min_engagement_score`` engagement gate (the real engagement bar,
+              not the technical duration floor).
 
         The single-run default path is intentionally left unchanged (each run
         starts from the persisted store's accumulated state); this helper is the
@@ -301,12 +303,13 @@ class Orchestrator:
             strategy=replace(DEFAULT_STRATEGY, platforms=ranked_platforms)
         )
 
-        # Quality Gate: map the learned engagement threshold onto the checker's
-        # technical duration floor. ``StubClipChecker`` is the DI knob the gate
-        # accepts; scaling the normalized [0, 1] threshold into its
-        # ``min_duration_seconds`` guard means a higher learned engagement bar
-        # demands longer clips, so the learned value is genuinely consumed by a
-        # constructor the gate exposes rather than merely reported.
-        min_duration = max(1, round(learnings.engagement_threshold * 10))
-        quality_gate = QualityGate(checker=StubClipChecker(min_duration_seconds=min_duration))
+        # Quality Gate: feed the learned engagement threshold into the checker's
+        # REAL engagement gate. ``StubClipChecker.min_engagement_score`` gates
+        # approval on the clip's predicted-engagement score (a clip below the
+        # bar is rejected), so the learned normalized [0, 1] engagement value is
+        # consumed as the engagement bar it actually is - not scaled into the
+        # unrelated technical duration floor.
+        quality_gate = QualityGate(
+            checker=StubClipChecker(min_engagement_score=learnings.engagement_threshold)
+        )
         return trend_scout, content_strategist, quality_gate, scheduler

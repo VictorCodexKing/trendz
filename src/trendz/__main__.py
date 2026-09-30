@@ -75,7 +75,7 @@ def _print_learnings(learnings: LearningState) -> None:
 
     print(f"  Quality Gate engagement threshold: {learnings.engagement_threshold:.4f}")
 
-    print("  Scheduler per-platform timing hints (minutes-of-day):")
+    print("  Scheduler per-platform timing hints (minutes-of-day, best window first):")
     if not learnings.timing_slots:
         print("    (none)")
     for platform in sorted(learnings.timing_slots):
@@ -102,8 +102,8 @@ def _print_learnings(learnings: LearningState) -> None:
     print("  Feedback loop (where each learning feeds back):")
     print("    - scoring weights   -> Trend Scout (trend ranking)")
     print("    - format priors     -> Content Strategist (platform emphasis)")
-    print("    - engagement threshold -> Quality Gate (clip approval bar)")
-    print("    - timing hints      -> Scheduler & Optimizer (post scheduling)")
+    print("    - engagement threshold -> Quality Gate (predicted-engagement gate)")
+    print("    - timing hints      -> Scheduler & Optimizer (best-window ordering)")
 
 
 def _print_result(result: RunResult) -> None:

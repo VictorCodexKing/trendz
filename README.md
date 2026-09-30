@@ -40,14 +40,32 @@ seeded epsilon-greedy multi-armed bandit that balances explore and exploit acros
 the per-platform arms. The learnings are shaped to feed straight back into the
 earlier agents: updated scoring weights into the **Trend Scout**, per-platform
 format/hook priors into the **Content Strategist**, an updated engagement
-threshold into the **Quality & Safety Gate**, and per-platform timing hints into
-the **Scheduler & Optimizer** (`Orchestrator.next_run_agents` maps a
-`LearningState` into those real tunable configs). Because the store persists
-across runs, applying reports repeatedly accumulates the priors, so the pipeline
-improves over time. Everything stays fully offline and deterministic (no network,
-API keys, wall-clock, or unseeded randomness). The remaining work is
-cross-cutting run-lifecycle hardening (retries/backoff, timeouts, circuit
-breakers, budget guards, and a dead-letter queue), not a missing pipeline stage.
+threshold into the **Quality & Safety Gate**'s real predicted-engagement gate
+(`StubClipChecker.min_engagement_score`, so a higher learned bar actually rejects
+low-engagement clips), and per-platform best-post-time hints into the **Scheduler
+& Optimizer**. The timing hints are genuinely learned, not carried through: each
+observed platform's posting-window tuple is deterministically re-ranked from its
+measured reward so a stronger-performing platform promotes a different best
+window to the front. `Orchestrator.next_run_agents` maps a `LearningState` into
+those real tunable configs. Because the store persists across runs, applying
+reports repeatedly accumulates the priors, so the pipeline improves over time.
+Everything stays fully offline and deterministic (no network, API keys,
+wall-clock, or unseeded randomness).
+
+**Scope note - high-signal-source weighting is deliberately deferred.** DESIGN.md
+stage 8 names "high-signal sources" among the learned Trend-Scout feedback
+outputs. This is intentionally not built yet because the attribution the Learning
+/ Memory Store receives does not carry it: `PerformanceReports` /
+`PostPerformance` attribute each measured outcome to a clip/brief/trend only, not
+to the originating trend's discovery `source`, so a per-source reward is not
+derivable from the reports today. Threading `source` through Content Strategist ->
+Clip Factory -> Publisher -> Performance Analyst is out of scope for this stage;
+the gap is acknowledged here rather than silently omitted, and can be closed by
+adding a `source` dimension to the attribution chain in a later change.
+
+The remaining cross-cutting work is run-lifecycle hardening (retries/backoff,
+timeouts, circuit breakers, budget guards, and a dead-letter queue), not a
+missing pipeline stage.
 
 See the full design in [docs/DESIGN.md](docs/DESIGN.md).
 

@@ -207,6 +207,47 @@ async def test_feedback_path_is_usable_as_scoring_weights(ctx: RunContext) -> No
         assert all(isinstance(m, int) for m in timing_slots[platform])
 
 
+async def test_timing_slots_are_learned_from_performance(ctx: RunContext) -> None:
+    """Timing slots are genuinely re-ranked by observed per-platform reward.
+
+    A high-reward platform has a later posting window promoted to the front,
+    while an unobserved platform keeps its default ordering - so the hints
+    respond to performance rather than being a static pass-through.
+    """
+    default = default_learning_state(ctx.run_id)
+    # instagram gets a very high score (reward near 1.0), tiktok a modest one.
+    payload = _reports(
+        ctx.run_id,
+        (
+            _report(0, "t0", "instagram", 1_000_000.0),
+            _report(1, "t1", "tiktok", 1000.0),
+        ),
+    )
+
+    state = await LearningStore(InMemoryMemoryStore()).run(ctx, payload)
+
+    # instagram's near-1.0 reward promotes its later window to lead: the slot
+    # tuple is rotated, so the leading (best) slot changed from the default.
+    default_ig = default.timing_slots["instagram"]
+    learned_ig = state.timing_slots["instagram"]
+    assert set(learned_ig) == set(default_ig)  # same windows, re-ranked
+    assert learned_ig[0] != default_ig[0]
+    assert learned_ig == default_ig[1:] + default_ig[:1]
+
+    # An unobserved platform keeps its default ordering untouched.
+    assert state.timing_slots["youtube_shorts"] == default.timing_slots["youtube_shorts"]
+
+
+async def test_timing_slots_learning_is_deterministic(ctx: RunContext) -> None:
+    """Given the same performance input, learned timing slots are identical."""
+    payload = _sample(ctx.run_id)
+
+    first = await LearningStore(InMemoryMemoryStore()).run(ctx, payload)
+    second = await LearningStore(InMemoryMemoryStore()).run(ctx, payload)
+
+    assert first.timing_slots == second.timing_slots
+
+
 async def test_empty_input_is_a_noop(ctx: RunContext) -> None:
     """(f) Empty reports leave the priors unchanged and do not persist a mutation."""
     store = InMemoryMemoryStore()
