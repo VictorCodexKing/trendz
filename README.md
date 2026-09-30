@@ -16,13 +16,16 @@ The nine agent roles are:
 3. **Clip Factory** - one worker per brief; script/voice, visual, caption, assembly.
 4. **Quality & Safety Gate** - automated per-clip technical and safety gate.
 5. **Scheduler & Optimizer** - decides when and where each clip posts.
-6. **Publisher** - one publisher per platform (fan-out per platform).
+6. **Publisher** - one publisher per platform (fan-out per platform), publishing
+   to YouTube Shorts, Instagram, TikTok, and Facebook.
 7. **Performance Analyst** - collects post metrics and attributes outcomes.
 8. **Learning / Memory Store** - self-improvement feedback loop and shared memory.
 
-Stages 1-5 (Trend Scout, Content Strategist, Clip Factory, Quality & Safety
-Gate, and Scheduler & Optimizer) are implemented today: a full offline run
-returns a per-platform `PublishPlan`. Stages 6-8 are scaffolded and planned.
+Stages 1-6 (Trend Scout, Content Strategist, Clip Factory, Quality & Safety
+Gate, Scheduler & Optimizer, and Publisher) are implemented today: a full
+offline run publishes each scheduled post per platform (YouTube Shorts,
+Instagram, TikTok, Facebook) and returns per-platform `PostResults`. Stages 7-8
+are scaffolded and planned.
 
 See the full design in [docs/DESIGN.md](docs/DESIGN.md).
 

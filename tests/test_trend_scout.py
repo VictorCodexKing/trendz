@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from trendz.agents.trend_scout import TrendScout, score_trend
-from trendz.contracts import PublishPlan, RunConfig, RunContext, Trend, TrendList
+from trendz.contracts import PostResults, RunConfig, RunContext, Trend, TrendList
 from trendz.orchestrator import Orchestrator
 from trendz.sources.mock_source import MockTrendSource
 
@@ -115,26 +115,30 @@ async def test_no_sources_yields_empty_trend_list(ctx: RunContext) -> None:
 
 
 async def test_orchestrator_runs_pipeline_end_to_end() -> None:
-    """The Orchestrator run() drives Trend Scout -> ... -> Scheduler & Optimizer."""
+    """The Orchestrator run() drives Trend Scout -> ... -> Publisher."""
     config = RunConfig()
     orchestrator = Orchestrator(config=config, sources=[MockTrendSource()])
 
     result = await orchestrator.run()
 
-    # The pipeline now yields the Scheduler & Optimizer's PublishPlan (stage 5).
-    assert isinstance(result, PublishPlan)
+    # The pipeline now yields the Publisher's PostResults (stage 6).
+    assert isinstance(result, PostResults)
     # The Content Strategist admits trends on whole-trend boundaries: with four
     # configured platforms and the default target_clip_count of 5, only the first
     # trend's full platform set (4 briefs) fits under the cap (admitting a second
     # would need 8). Each brief becomes one rendered clip, the stub checker
-    # approves them all, and (with the default ab_variant_count of 1) each
-    # approved clip becomes exactly one scheduled post.
+    # approves them all, (with the default ab_variant_count of 1) each approved
+    # clip becomes exactly one scheduled post, and the Publisher publishes each.
     assert len(result) == 4
     assert len(result) <= config.target_clip_count
-    # Every scheduled post carries attribution back to a clip, brief, and trend.
-    for post in result.posts:
-        assert post.clip_id
-        assert post.brief_id
-        assert post.trend_id
-    # Whole-trend admission: all scheduled posts belong to a single trend here.
-    assert len({post.trend_id for post in result.posts}) == 1
+    # Every post result was published successfully by the offline stub client.
+    assert len(result.succeeded) == 4
+    assert len(result.failed) == 0
+    # Every post result carries attribution back to a clip, brief, and trend.
+    for post_result in result.results:
+        assert post_result.clip_id
+        assert post_result.brief_id
+        assert post_result.trend_id
+        assert post_result.idempotency_key
+    # Whole-trend admission: all results belong to a single trend here.
+    assert len({post_result.trend_id for post_result in result.results}) == 1
