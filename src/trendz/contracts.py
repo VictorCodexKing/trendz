@@ -72,6 +72,26 @@ class RunConfig(BaseModel):
             "dropped-and-logged immediately."
         ),
     )
+    min_post_gap_minutes: int = Field(
+        default=30,
+        ge=0,
+        description=(
+            "Minimum spacing, in minutes, between two posts scheduled on the "
+            "SAME platform. The Scheduler pushes later posts forward so no two "
+            "same-platform posts land closer than this, avoiding spam flags. "
+            "0 means no spacing is enforced."
+        ),
+    )
+    ab_variant_count: int = Field(
+        default=1,
+        ge=1,
+        description=(
+            "How many caption/hashtag A/B variants the Scheduler produces per "
+            "approved clip. 1 means no A/B testing (a single post per clip); "
+            "N>1 emits N posts per clip with deterministic caption/hashtag "
+            "variations and incrementing variant indices."
+        ),
+    )
 
 
 class BudgetLedger(BaseModel):
@@ -415,3 +435,103 @@ class QualityReport(BaseModel):
         if n < 0:
             raise ValueError("n must be non-negative")
         return self.approved[:n]
+
+
+class ScheduledPost(BaseModel):
+    """A single planned post produced by the Scheduler & Optimizer (stage 5).
+
+    One approved :class:`RenderedClip` becomes one or more scheduled posts: one
+    per A/B caption variant (see :attr:`variant`). Each post pins the platform,
+    the aware-UTC :attr:`scheduled_at` time the Scheduler chose (derived from a
+    deterministic base time plus the platform's optimal-time hint and the
+    configured minimum spacing gap), and the caption/hashtags to publish with
+    it. Because :class:`RenderedClip` does not carry caption/hashtags (those live
+    on the originating :class:`ClipBrief`), the Scheduler sources them from the
+    brief and records the resolved copy here so stage 6 (the Publisher) needs no
+    further lookup.
+
+    ``clip_id``/``brief_id``/``trend_id`` carry the same attribution linkage the
+    :class:`RenderedClip` and :class:`ClipVerdict` carry, so a published post can
+    be traced back to its clip, brief, and originating trend by the future
+    Performance Analyst / Learning Store.
+
+    Frozen because a scheduled post is an immutable fact once planned: the plan
+    is assembled and fanned out downstream and must never be mutated in place.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    clip_id: str = Field(description="ID of the scheduled RenderedClip.")
+    brief_id: str = Field(description="ID of the originating ClipBrief.")
+    trend_id: str = Field(description="ID of the originating Trend, for attribution.")
+    platform: Platform = Field(description="Target short-video platform.")
+    scheduled_at: datetime = Field(description="Aware UTC time the post is scheduled for.")
+    caption: str = Field(description="Post caption/description copy for this variant.")
+    hashtags: tuple[str, ...] = Field(
+        default_factory=tuple,
+        description="Hashtags to publish with this variant (without leading '#').",
+    )
+    variant: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Index of the A/B caption/hashtag variant for this clip. 0 is the "
+            "base caption; 1..N are deterministic derivations."
+        ),
+    )
+
+
+class PublishPlan(BaseModel):
+    """The Scheduler & Optimizer's output: scheduled posts organized by platform.
+
+    Returned by the Scheduler after it groups the Quality Gate's approved clips
+    by platform, orders them deterministically, decides each post's
+    :attr:`~ScheduledPost.scheduled_at` from the injected audience-timing signal
+    plus the configured minimum spacing gap, and expands each clip into its A/B
+    caption variants.
+
+    This is the stage-6 Publisher fan-out boundary, exactly as
+    :class:`ClipBriefList` was the Clip Factory boundary: stage 6 will publish
+    each platform's posts through its own platform adapter, so the per-platform
+    slice must be trivially extractable. :meth:`for_platform` returns one
+    platform's posts in scheduled order, and :meth:`slices` returns one
+    ``(platform, posts)`` pair per platform in sorted platform order (the
+    fan-out iterable).
+
+    ``posts`` holds every scheduled post in a single deterministic global order.
+    Mirrors :class:`RenderedClipSet`/:class:`QualityReport`: frozen, with
+    ``__len__`` over the posts.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    run_id: str
+    posts: tuple[ScheduledPost, ...] = Field(default_factory=tuple)
+
+    def __len__(self) -> int:
+        return len(self.posts)
+
+    @property
+    def platforms(self) -> tuple[Platform, ...]:
+        """Return the sorted tuple of distinct platforms present (deterministic)."""
+        return tuple(sorted({post.platform for post in self.posts}))
+
+    def for_platform(self, platform: Platform) -> tuple[ScheduledPost, ...]:
+        """Return ``platform``'s posts in scheduled order.
+
+        This is the per-platform slice stage 6 parallelizes across. Posts are
+        returned sorted by :attr:`~ScheduledPost.scheduled_at` (ties broken by
+        ``clip_id`` then ``variant``) so the order is stable and deterministic.
+        """
+        selected = [post for post in self.posts if post.platform == platform]
+        selected.sort(key=lambda post: (post.scheduled_at, post.clip_id, post.variant))
+        return tuple(selected)
+
+    def slices(self) -> tuple[tuple[Platform, tuple[ScheduledPost, ...]], ...]:
+        """Return one ``(platform, posts)`` pair per platform in sorted order.
+
+        The fan-out iterable for stage 6: each pair carries a platform and its
+        posts in scheduled order, with platforms in the same deterministic order
+        as :attr:`platforms`.
+        """
+        return tuple((platform, self.for_platform(platform)) for platform in self.platforms)
