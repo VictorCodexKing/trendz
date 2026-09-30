@@ -801,7 +801,15 @@ class PerformanceReports(BaseModel):
         )
 
     def top(self, n: int) -> tuple[PostPerformance, ...]:
-        """Return the first ``n`` reports in the deterministic global order."""
+        """Return the ``n`` highest-scoring reports, ranked by ``performance_score``.
+
+        Unlike :meth:`PostResults.top` (which has no intrinsic ranking), reports
+        carry a :attr:`PostPerformance.performance_score`, so ``top`` ranks by
+        it descending - the same "top means best" meaning :meth:`TrendResults.top`
+        carries. Ties break on the deterministic global order (Python's sort is
+        stable), so two runs over the same input yield the same ordering.
+        """
         if n < 0:
             raise ValueError("n must be non-negative")
-        return self.reports[:n]
+        ranked = sorted(self.reports, key=lambda report: report.performance_score, reverse=True)
+        return tuple(ranked[:n])

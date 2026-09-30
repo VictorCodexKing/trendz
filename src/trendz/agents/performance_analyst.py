@@ -33,7 +33,7 @@ analytics API can be swapped in later without touching the fan-out logic.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 
 from trendz.agents.base import BaseAgent
 from trendz.analytics.base import MetricsProvider
@@ -90,12 +90,17 @@ def _collected_at(result: PostResult, dwell_hours: int) -> datetime:
 
     Modelled as ``published_at + dwell_hours`` (see
     :attr:`~trendz.contracts.RunConfig.dwell_hours`) - a collection offset, not a
-    real wait. ``published_at`` is always set on a succeeded post; if it is
-    somehow missing, fall back to the context creation time so the field stays
-    an aware-UTC datetime.
+    real wait. A succeeded post always carries ``published_at`` (the Publisher
+    guarantees it on success, and the Analyst only ever collects
+    ``payload.succeeded``), so we assert that invariant rather than reading a
+    live wall clock: the whole stage stays offline and reproducible.
     """
-    base = result.published_at if result.published_at is not None else datetime.now(timezone.utc)
-    return base + timedelta(hours=dwell_hours)
+    if result.published_at is None:
+        raise ValueError(
+            f"succeeded post {result.post_id!r} is missing published_at; "
+            "the dwell-based collection time cannot be derived deterministically"
+        )
+    return result.published_at + timedelta(hours=dwell_hours)
 
 
 class PerformanceAnalyst(BaseAgent[PostResults, PerformanceReports]):
@@ -164,7 +169,7 @@ class PerformanceAnalyst(BaseAgent[PostResults, PerformanceReports]):
 
         report = PerformanceReports(run_id=ctx.run_id, reports=reports)
         self.log.info(
-            "analyst_done",
+            "analyze_done",
             reports=len(report),
             platforms=len(report.platforms),
             excluded_failures=len(payload.failed),

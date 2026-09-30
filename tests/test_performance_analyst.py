@@ -191,6 +191,40 @@ async def test_attribution_grouped_by_trend(ctx: RunContext) -> None:
     assert sum(len(group) for _, group in by_trend) == len(reports)
 
 
+async def test_top_ranks_reports_by_performance_score(ctx: RunContext) -> None:
+    """top(n) returns the highest-scoring reports, not publish order.
+
+    On a scored container ``top`` ranks by ``performance_score`` descending
+    (mirroring TrendResults.top), so it must not simply echo the stored publish
+    order when that order is not score-sorted.
+    """
+    results = (
+        _result(0, "tiktok"),
+        _result(1, "instagram"),
+        _result(2, "youtube_shorts"),
+        _result(3, "facebook"),
+    )
+    payload = _results(ctx.run_id, results)
+
+    reports = await PerformanceAnalyst(StubMetricsProvider()).run(ctx, payload)
+
+    ranked = sorted(reports.reports, key=lambda r: r.performance_score, reverse=True)
+    # top(n) is score-ranked, not stored/publish order.
+    assert reports.top(2) == tuple(ranked[:2])
+    assert reports.top(len(reports)) == tuple(ranked)
+    # Descending by score, and a partition of all reports.
+    scores = [r.performance_score for r in reports.top(len(reports))]
+    assert scores == sorted(scores, reverse=True)
+    assert set(reports.top(len(reports))) == set(reports.reports)
+    # Guard is preserved.
+    try:
+        reports.top(-1)
+    except ValueError:
+        pass
+    else:  # pragma: no cover - defensive
+        raise AssertionError("top(-1) must raise ValueError")
+
+
 class _ConcurrencyProbeProvider(MetricsProvider):
     """A provider that tracks the high-water mark of concurrent collect() calls."""
 

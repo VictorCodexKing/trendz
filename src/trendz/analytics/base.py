@@ -42,11 +42,13 @@ class MetricsProvider(ABC):
         """Collect the engagement metrics for one successfully published post.
 
         Args:
-            ctx: The run context, for run-scoped config. The caller (Performance
-                Analyst) is responsible for any budget/quota guard around this
-                call via ``ctx.budget``. A provider must not depend on a live
-                wall clock: the dwell maturation window is modelled by the
-                Analyst as the deterministic ``ctx.config.dwell_hours`` offset.
+            ctx: The run context, for run-scoped config. A provider must not
+                depend on a live wall clock: the dwell maturation window is
+                modelled by the Analyst as the deterministic
+                ``ctx.config.dwell_hours`` offset. (Like the Publisher, the
+                Analyst does not currently charge ``ctx.budget`` for collection;
+                a budget/quota guard belongs here when a real, rate-limited
+                provider replaces the offline stub.)
             result: The succeeded :class:`~trendz.contracts.PostResult` to
                 collect metrics for. Must not be mutated: results are frozen and
                 shared across concurrent collections. A real provider keys the
