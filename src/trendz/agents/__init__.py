@@ -14,9 +14,11 @@ Implemented so far:
     - Quality & Safety Gate: per-clip technical/safety/engagement gate; approves,
       re-renders rejected clips for bounded retries, or drops-and-logs
       (embarrassingly parallel) -- see ``quality_gate``.
+    - Scheduler & Optimizer: consumes the Quality Gate's approved clips and
+      emits a per-platform PublishPlan (deterministic timing, spacing, and A/B
+      variants), the stage-6 Publisher fan-out boundary -- see ``scheduler``.
 
 TODO: remaining agents to be added as their own modules under this package:
-    - Scheduler & Optimizer: decides when and where each clip posts.
     - Publisher: one Platform Publisher per platform (fan-out per platform).
     - Performance Analyst: collects post metrics and attributes outcomes.
     - Learning / Memory Store: self-improvement feedback loop and shared memory.
