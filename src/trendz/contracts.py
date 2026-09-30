@@ -1019,5 +1019,37 @@ class LearningState(BaseModel):
         return None
 
 
+class RunResult(BaseModel):
+    """The Orchestrator's end-to-end run output bundle (stages 1-8).
+
+    A single frozen bundle returned by :meth:`~trendz.orchestrator.Orchestrator.run`
+    now that the pipeline is complete end to end. It carries:
+
+        - :attr:`run_id`: the run's unique id (the same one threaded through the
+          ``RunContext`` and stamped on every contract the run produced).
+        - :attr:`reports`: the Performance Analyst's :class:`PerformanceReports`
+          (stage 7) - the per-post metrics + score + attribution for every
+          successfully published post.
+        - :attr:`learnings`: the Learning / Memory Store's :class:`LearningState`
+          (stage 8) - the updated, fed-back tunable priors and bandit state.
+
+    Bundling both keeps the ``run()`` return type honest about the whole
+    pipeline: callers can inspect what was published *and* what the run learned,
+    and feed the learnings back into the next run's tunable configs.
+
+    Frozen because a run result is an immutable fact once the run completes.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    run_id: str
+    reports: PerformanceReports = Field(
+        description="The Performance Analyst's per-post reports (stage 7)."
+    )
+    learnings: LearningState = Field(
+        description="The Learning / Memory Store's updated tunable priors (stage 8)."
+    )
+
+
 if TYPE_CHECKING:  # pragma: no cover - typing-only import to avoid a cycle
     from trendz.agents.trend_scout import ScoringWeights

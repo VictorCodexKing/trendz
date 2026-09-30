@@ -21,13 +21,33 @@ The nine agent roles are:
 7. **Performance Analyst** - collects post metrics and attributes outcomes.
 8. **Learning / Memory Store** - self-improvement feedback loop and shared memory.
 
-Stages 1-7 (Trend Scout, Content Strategist, Clip Factory, Quality & Safety
-Gate, Scheduler & Optimizer, Publisher, and Performance Analyst) are implemented
-today: a full offline run publishes each scheduled post per platform (YouTube
-Shorts, Instagram, TikTok, Facebook), then collects each succeeded post's metrics
-and attributes the outcome back to its clip/brief/trend, returning per-platform,
-per-post `PerformanceReports` with attribution. Stage 8 is scaffolded and
-planned.
+All eight stages (Trend Scout, Content Strategist, Clip Factory, Quality & Safety
+Gate, Scheduler & Optimizer, Publisher, Performance Analyst, and Learning /
+Memory Store) are implemented today, so the pipeline is complete end to end:
+discover -> plan -> render -> gate -> schedule -> publish -> analyze -> learn ->
+feed back. A full offline run discovers and ranks trends, plans and renders
+clips, gates them, schedules and publishes each post per platform (YouTube
+Shorts, Instagram, TikTok, Facebook), collects each succeeded post's metrics and
+attributes the outcome back to its clip/brief/trend, then folds those outcomes
+into the persisted learnings and returns a `RunResult` bundling the per-platform,
+per-post `PerformanceReports` and the stage-8 `LearningState`.
+
+Stage 8, the Learning / Memory Store, closes the self-improvement loop. It folds
+the Performance Analyst's `PerformanceReports` into a persisted `LearningState`
+via a deterministic fixed-learning-rate reinforcement update (an
+exponential-moving-average nudge toward the observed, normalized reward) plus a
+seeded epsilon-greedy multi-armed bandit that balances explore and exploit across
+the per-platform arms. The learnings are shaped to feed straight back into the
+earlier agents: updated scoring weights into the **Trend Scout**, per-platform
+format/hook priors into the **Content Strategist**, an updated engagement
+threshold into the **Quality & Safety Gate**, and per-platform timing hints into
+the **Scheduler & Optimizer** (`Orchestrator.next_run_agents` maps a
+`LearningState` into those real tunable configs). Because the store persists
+across runs, applying reports repeatedly accumulates the priors, so the pipeline
+improves over time. Everything stays fully offline and deterministic (no network,
+API keys, wall-clock, or unseeded randomness). The remaining work is
+cross-cutting run-lifecycle hardening (retries/backoff, timeouts, circuit
+breakers, budget guards, and a dead-letter queue), not a missing pipeline stage.
 
 See the full design in [docs/DESIGN.md](docs/DESIGN.md).
 
