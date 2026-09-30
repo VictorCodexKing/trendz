@@ -55,13 +55,13 @@ async def test_briefs_link_back_to_input_trend_ids(ctx: RunContext) -> None:
 async def test_total_count_respects_target_clip_count() -> None:
     """Briefs never exceed the cap and trends are admitted whole.
 
-    With 3 configured platforms and a cap of 4, only the first trend's full
-    platform set (3 briefs) fits; admitting the second would need 6 briefs and
+    With 4 configured platforms and a cap of 5, only the first trend's full
+    platform set (4 briefs) fits; admitting the second would need 8 briefs and
     overflow the cap, so it is dropped whole rather than truncated mid-trend.
     """
-    config = RunConfig(target_clip_count=4)
+    config = RunConfig(target_clip_count=5)
     ctx = RunContext.new(run_id="cap-run", config=config)
-    # 3 trends x 3 platforms = 9 possible briefs; the cap of 4 must bound it.
+    # 3 trends x 4 platforms = 12 possible briefs; the cap of 5 must bound it.
     trends = _trend_list(
         ctx.run_id,
         _trend("t1", "AI cooking hacks"),
@@ -73,13 +73,13 @@ async def test_total_count_respects_target_clip_count() -> None:
     result = await strategist.run(ctx, trends)
 
     # Whole-trend boundary: exactly the first trend, no partial platform set.
-    assert len(result) == 3
+    assert len(result) == 4
     assert {b.trend_id for b in result.briefs} == {"t1"}
 
 
 async def test_cap_admits_trends_on_whole_trend_boundaries() -> None:
     """A trend is either fully planned or fully dropped, never truncated."""
-    config = RunConfig(target_clip_count=6)
+    config = RunConfig(target_clip_count=8)
     ctx = RunContext.new(run_id="whole-run", config=config)
     trends = _trend_list(
         ctx.run_id,
@@ -91,8 +91,8 @@ async def test_cap_admits_trends_on_whole_trend_boundaries() -> None:
 
     result = await strategist.run(ctx, trends)
 
-    # 3 platforms per trend; cap of 6 admits exactly the first two trends whole.
-    assert len(result) == 6
+    # 4 platforms per trend; cap of 8 admits exactly the first two trends whole.
+    assert len(result) == 8
     assert {b.trend_id for b in result.briefs} == {"t1", "t2"}
     # Every admitted trend has its full platform set (no partial coverage).
     for trend_id in {"t1", "t2"}:

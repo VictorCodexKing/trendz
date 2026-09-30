@@ -211,10 +211,11 @@ class TrendList(BaseModel):
 
 
 # Short platform identifiers the Content Strategist targets. Each maps to a
-# canonical short-video surface; the strategist chooses aspect ratio and length
-# per platform. Kept as a Literal (not a free string) so a brief can only name a
-# platform the pipeline knows how to render and publish.
-Platform = Literal["tiktok", "reels", "shorts"]
+# canonical short-video surface (YouTube Shorts, Instagram, TikTok, Facebook);
+# the strategist chooses aspect ratio and length per platform. Kept as a Literal
+# (not a free string) so a brief can only name a platform the pipeline knows how
+# to render and publish.
+Platform = Literal["youtube_shorts", "instagram", "tiktok", "facebook"]
 
 # Canonical short-video aspect ratios the Assembly step supports (per DESIGN.md
 # stage 3): vertical, square, and landscape.

@@ -123,13 +123,13 @@ async def test_orchestrator_runs_pipeline_end_to_end() -> None:
 
     # The pipeline now yields the Scheduler & Optimizer's PublishPlan (stage 5).
     assert isinstance(result, PublishPlan)
-    # The Content Strategist admits trends on whole-trend boundaries: with three
+    # The Content Strategist admits trends on whole-trend boundaries: with four
     # configured platforms and the default target_clip_count of 5, only the first
-    # trend's full platform set (3 briefs) fits under the cap (admitting a second
-    # would need 6). Each brief becomes one rendered clip, the stub checker
+    # trend's full platform set (4 briefs) fits under the cap (admitting a second
+    # would need 8). Each brief becomes one rendered clip, the stub checker
     # approves them all, and (with the default ab_variant_count of 1) each
     # approved clip becomes exactly one scheduled post.
-    assert len(result) == 3
+    assert len(result) == 4
     assert len(result) <= config.target_clip_count
     # Every scheduled post carries attribution back to a clip, brief, and trend.
     for post in result.posts:
