@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from trendz.agents.trend_scout import TrendScout, score_trend
-from trendz.contracts import QualityReport, RunConfig, RunContext, Trend, TrendList
+from trendz.contracts import PublishPlan, RunConfig, RunContext, Trend, TrendList
 from trendz.orchestrator import Orchestrator
 from trendz.sources.mock_source import MockTrendSource
 
@@ -115,25 +115,26 @@ async def test_no_sources_yields_empty_trend_list(ctx: RunContext) -> None:
 
 
 async def test_orchestrator_runs_pipeline_end_to_end() -> None:
-    """The Orchestrator run() drives Trend Scout -> ... -> Quality & Safety Gate."""
+    """The Orchestrator run() drives Trend Scout -> ... -> Scheduler & Optimizer."""
     config = RunConfig()
     orchestrator = Orchestrator(config=config, sources=[MockTrendSource()])
 
     result = await orchestrator.run()
 
-    # The pipeline now yields the Quality & Safety Gate's report (stage 4 output).
-    assert isinstance(result, QualityReport)
+    # The pipeline now yields the Scheduler & Optimizer's PublishPlan (stage 5).
+    assert isinstance(result, PublishPlan)
     # The Content Strategist admits trends on whole-trend boundaries: with three
     # configured platforms and the default target_clip_count of 5, only the first
     # trend's full platform set (3 briefs) fits under the cap (admitting a second
-    # would need 6). Each brief becomes one rendered clip, and the deterministic
-    # stub checker approves them all.
+    # would need 6). Each brief becomes one rendered clip, the stub checker
+    # approves them all, and (with the default ab_variant_count of 1) each
+    # approved clip becomes exactly one scheduled post.
     assert len(result) == 3
     assert len(result) <= config.target_clip_count
-    assert result.dropped == ()
-    # Every approved clip carries attribution back to a brief and a trend.
-    for clip in result.approved:
-        assert clip.brief_id
-        assert clip.trend_id
-    # Whole-trend admission: all approved clips belong to a single trend here.
-    assert len({clip.trend_id for clip in result.approved}) == 1
+    # Every scheduled post carries attribution back to a clip, brief, and trend.
+    for post in result.posts:
+        assert post.clip_id
+        assert post.brief_id
+        assert post.trend_id
+    # Whole-trend admission: all scheduled posts belong to a single trend here.
+    assert len({post.trend_id for post in result.posts}) == 1
