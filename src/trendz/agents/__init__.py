@@ -25,7 +25,10 @@ Implemented so far:
       offline metrics-provider (fan-out per post), derives a per-post
       performance score, attributes outcomes back to trend/brief/clip, and emits
       a PerformanceReports -- see ``performance_analyst``.
-
-TODO: remaining agents to be added as their own modules under this package:
-    - Learning / Memory Store: self-improvement feedback loop and shared memory.
+    - Learning / Memory Store: the self-improvement feedback loop and shared
+      memory; folds the Analyst's PerformanceReports into the persisted
+      LearningState via a deterministic fixed-learning-rate reinforcement update
+      plus a seeded epsilon-greedy bandit allocation, producing updated scoring
+      weights/format priors/engagement threshold/timing hints shaped to feed back
+      into the earlier agents -- see ``learning_store``.
 """
