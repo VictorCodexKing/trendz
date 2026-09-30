@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from trendz.agents.content_strategist import (
     DEFAULT_STRATEGY,
     PLATFORM_FORMATS,
@@ -51,7 +53,12 @@ async def test_briefs_link_back_to_input_trend_ids(ctx: RunContext) -> None:
 
 
 async def test_total_count_respects_target_clip_count() -> None:
-    """The number of briefs never exceeds ctx.config.target_clip_count."""
+    """Briefs never exceed the cap and trends are admitted whole.
+
+    With 3 configured platforms and a cap of 4, only the first trend's full
+    platform set (3 briefs) fits; admitting the second would need 6 briefs and
+    overflow the cap, so it is dropped whole rather than truncated mid-trend.
+    """
     config = RunConfig(target_clip_count=4)
     ctx = RunContext.new(run_id="cap-run", config=config)
     # 3 trends x 3 platforms = 9 possible briefs; the cap of 4 must bound it.
@@ -65,7 +72,47 @@ async def test_total_count_respects_target_clip_count() -> None:
 
     result = await strategist.run(ctx, trends)
 
-    assert len(result) == 4
+    # Whole-trend boundary: exactly the first trend, no partial platform set.
+    assert len(result) == 3
+    assert {b.trend_id for b in result.briefs} == {"t1"}
+
+
+async def test_cap_admits_trends_on_whole_trend_boundaries() -> None:
+    """A trend is either fully planned or fully dropped, never truncated."""
+    config = RunConfig(target_clip_count=6)
+    ctx = RunContext.new(run_id="whole-run", config=config)
+    trends = _trend_list(
+        ctx.run_id,
+        _trend("t1", "AI cooking hacks"),
+        _trend("t2", "Retro gaming speedruns"),
+        _trend("t3", "Sustainable fashion tips"),
+    )
+    strategist = ContentStrategist()
+
+    result = await strategist.run(ctx, trends)
+
+    # 3 platforms per trend; cap of 6 admits exactly the first two trends whole.
+    assert len(result) == 6
+    assert {b.trend_id for b in result.briefs} == {"t1", "t2"}
+    # Every admitted trend has its full platform set (no partial coverage).
+    for trend_id in {"t1", "t2"}:
+        platforms = {b.platform for b in result.briefs if b.trend_id == trend_id}
+        assert platforms == set(DEFAULT_STRATEGY.platforms)
+
+
+async def test_duplicate_trend_ids_raise_value_error() -> None:
+    """Duplicate trend ids fail fast to protect brief-id attribution."""
+    config = RunConfig(target_clip_count=100)
+    ctx = RunContext.new(run_id="dup-run", config=config)
+    trends = _trend_list(
+        ctx.run_id,
+        _trend("dup", "AI cooking hacks"),
+        _trend("dup", "Retro gaming speedruns"),
+    )
+    strategist = ContentStrategist()
+
+    with pytest.raises(ValueError, match="duplicate trend ids"):
+        await strategist.run(ctx, trends)
 
 
 async def test_zero_target_clip_count_yields_no_briefs() -> None:
