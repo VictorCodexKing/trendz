@@ -5,12 +5,13 @@ The Orchestrator owns the run lifecycle: it builds a
 dispatches work to agents, and (eventually) enforces concurrency limits, retries,
 timeouts, and budget guards.
 
-Today it implements the first five stages: Trend Scout -> Content Strategist ->
-Clip Factory -> Quality & Safety Gate -> Scheduler & Optimizer, returning the
-Scheduler's :class:`~trendz.contracts.PublishPlan`. The Clip Factory is the
-fan-out/concurrency core, mapping a Clip Worker over the briefs through
-``bounded_map``; the Quality Gate fans out the same way, one evaluation per clip.
-The remaining stages (6+) are present as clearly-marked TODO scaffolding so the
+Today it implements the first six stages: Trend Scout -> Content Strategist ->
+Clip Factory -> Quality & Safety Gate -> Scheduler & Optimizer -> Publisher,
+returning the Publisher's :class:`~trendz.contracts.PostResults`. The Clip
+Factory is the fan-out/concurrency core, mapping a Clip Worker over the briefs
+through ``bounded_map``; the Quality Gate fans out the same way, one evaluation
+per clip; the Publisher fans out per platform over the ``PublishPlan``'s slices.
+The remaining stages (7+) are present as clearly-marked TODO scaffolding so the
 module boundaries and the fan-out/concurrency model from the design are visible
 and ready to fill in.
 """
@@ -23,11 +24,12 @@ import structlog
 
 from trendz.agents.clip_factory import ClipFactory
 from trendz.agents.content_strategist import ContentStrategist
+from trendz.agents.publisher import Publisher
 from trendz.agents.quality_gate import QualityGate
 from trendz.agents.scheduler import Scheduler
 from trendz.agents.trend_scout import TrendScout
 from trendz.concurrency import bounded_map
-from trendz.contracts import PublishPlan, RunConfig, RunContext
+from trendz.contracts import PostResults, RunConfig, RunContext
 from trendz.sources.base import TrendSource
 
 # Re-exported so callers and downstream stages can reach the bounded worker pool
@@ -40,9 +42,9 @@ log = structlog.get_logger(component="orchestrator")
 class Orchestrator:
     """Builds the run context and drives the pipeline stages.
 
-    Stages 1-5 (Trend Scout, Content Strategist, Clip Factory, Quality & Safety
-    Gate, Scheduler & Optimizer) are wired up and threaded the same
-    ``RunContext``, and :meth:`run` returns the Scheduler's ``PublishPlan``.
+    Stages 1-6 (Trend Scout, Content Strategist, Clip Factory, Quality & Safety
+    Gate, Scheduler & Optimizer, Publisher) are wired up and threaded the same
+    ``RunContext``, and :meth:`run` returns the Publisher's ``PostResults``.
     Downstream stages are stubbed below with the intended data flow and fan-out
     points documented.
     """
@@ -59,16 +61,19 @@ class Orchestrator:
         # Stage 5: plans approved clips into a per-platform PublishPlan using the
         # default injected (deterministic offline) audience-timing provider.
         self._scheduler = Scheduler()
+        # Stage 6: publishes the PublishPlan per platform through the default
+        # injected (deterministic offline) publisher-client.
+        self._publisher = Publisher()
 
     def _new_context(self) -> RunContext:
         """Create a fresh run context with a unique run id."""
         return RunContext.new(run_id=str(uuid.uuid4()), config=self._config)
 
-    async def run(self) -> PublishPlan:
+    async def run(self) -> PostResults:
         """Execute the pipeline.
 
-        Today this runs stages 1-5 and returns the Scheduler & Optimizer's
-        ``PublishPlan`` (the approved clips scheduled per platform). As
+        Today this runs stages 1-6 and returns the Publisher's ``PostResults``
+        (the outcome of publishing each scheduled post per platform). As
         downstream agents land, each stage below is unstubbed and chained on,
         threading the same ``RunContext`` through.
         """
@@ -130,18 +135,28 @@ class Orchestrator:
             platform_count=len(plan.platforms),
         )
 
+        # Stage 6: Publisher -> PostResults. Fans out per platform over the
+        # plan's per-platform slices (``plan.slices()``) through ``bounded_map``
+        # capped at ``self._config.concurrency_degree`` - one Platform Publisher
+        # per platform, concurrent. Each post is published through the injected
+        # publisher-client with a stable idempotency key so it is never
+        # double-posted; a failed post is recorded and the rest continue (never
+        # raised).
+        results = await self._publisher.run(ctx, plan)
+        log.info(
+            "publisher_done",
+            run_id=ctx.run_id,
+            succeeded_count=len(results.succeeded),
+            failed_count=len(results.failed),
+            platform_count=len(results.platforms),
+        )
+
         # ------------------------------------------------------------------
         # TODO: remaining pipeline stages (see docs/DESIGN.md). Each stage is an
         # agent subclassing BaseAgent, threaded the same RunContext. The fan-out
         # stages use ``bounded_map`` (from trendz.concurrency) to cap concurrency
-        # at ``self._config.concurrency_degree``. The Publisher fans out over the
-        # PublishPlan's per-platform slices (``plan.slices()`` /
-        # ``plan.for_platform(...)``), the stage-6 boundary.
+        # at ``self._config.concurrency_degree``.
         #
-        #   results  = await bounded_map(
-        #                  lambda slice_: Publisher(...).run(ctx, slice_),
-        #                  plan.slices(), self._config.concurrency_degree,
-        #              )                       # fan-out boundary: M platforms -> PostResults
         #   reports  = await Analyst(...).run(ctx, results)      # -> PerformanceReports
         #   await LearningStore(...).run(ctx, reports)  # updates weights/priors
         #
@@ -154,7 +169,9 @@ class Orchestrator:
         log.info(
             "run_complete",
             run_id=ctx.run_id,
-            post_count=len(plan),
-            platform_count=len(plan.platforms),
+            post_count=len(results),
+            succeeded_count=len(results.succeeded),
+            failed_count=len(results.failed),
+            platform_count=len(results.platforms),
         )
-        return plan
+        return results

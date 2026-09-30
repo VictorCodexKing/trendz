@@ -69,17 +69,17 @@ async def test_grouping_and_slices_route_posts_by_platform(ctx: RunContext) -> N
     """Posts are grouped by platform; for_platform/slices return the right posts."""
     clips = (
         _clip(0, platform="tiktok"),
-        _clip(1, platform="reels"),
+        _clip(1, platform="instagram"),
         _clip(2, platform="tiktok"),
-        _clip(3, platform="shorts"),
+        _clip(3, platform="youtube_shorts"),
     )
     briefs = _brief_list(
         ctx.run_id,
         (
             _brief(0, platform="tiktok"),
-            _brief(1, platform="reels"),
+            _brief(1, platform="instagram"),
             _brief(2, platform="tiktok"),
-            _brief(3, platform="shorts"),
+            _brief(3, platform="youtube_shorts"),
         ),
     )
     scheduler = Scheduler(base_time=BASE_TIME)
@@ -90,13 +90,13 @@ async def test_grouping_and_slices_route_posts_by_platform(ctx: RunContext) -> N
     assert plan.run_id == ctx.run_id
     assert len(plan) == 4
     # platforms property is sorted and distinct.
-    assert plan.platforms == ("reels", "shorts", "tiktok")
+    assert plan.platforms == ("instagram", "tiktok", "youtube_shorts")
     assert {p.clip_id for p in plan.for_platform("tiktok")} == {"clip-b0", "clip-b2"}
-    assert {p.clip_id for p in plan.for_platform("reels")} == {"clip-b1"}
-    assert {p.clip_id for p in plan.for_platform("shorts")} == {"clip-b3"}
+    assert {p.clip_id for p in plan.for_platform("instagram")} == {"clip-b1"}
+    assert {p.clip_id for p in plan.for_platform("youtube_shorts")} == {"clip-b3"}
     # slices() yields one (platform, posts) pair per platform in sorted order.
     slice_platforms = [platform for platform, _ in plan.slices()]
-    assert slice_platforms == ["reels", "shorts", "tiktok"]
+    assert slice_platforms == ["instagram", "tiktok", "youtube_shorts"]
     for platform, platform_posts in plan.slices():
         assert all(p.platform == platform for p in platform_posts)
 
@@ -220,10 +220,10 @@ async def test_missing_brief_falls_back_to_placeholder_caption(ctx: RunContext) 
 
 async def test_scheduling_is_deterministic(ctx: RunContext) -> None:
     """Two runs with the same inputs produce equal PublishPlans."""
-    clips = (_clip(0, platform="reels"), _clip(1, platform="tiktok"), _clip(2))
+    clips = (_clip(0, platform="instagram"), _clip(1, platform="tiktok"), _clip(2))
     briefs = _brief_list(
         ctx.run_id,
-        (_brief(0, platform="reels"), _brief(1, platform="tiktok"), _brief(2)),
+        (_brief(0, platform="instagram"), _brief(1, platform="tiktok"), _brief(2)),
     )
 
     first = await Scheduler(base_time=BASE_TIME).run(ctx, _report(ctx.run_id, clips), briefs=briefs)

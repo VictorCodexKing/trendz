@@ -211,10 +211,11 @@ class TrendList(BaseModel):
 
 
 # Short platform identifiers the Content Strategist targets. Each maps to a
-# canonical short-video surface; the strategist chooses aspect ratio and length
-# per platform. Kept as a Literal (not a free string) so a brief can only name a
-# platform the pipeline knows how to render and publish.
-Platform = Literal["tiktok", "reels", "shorts"]
+# canonical short-video surface (YouTube Shorts, Instagram, TikTok, Facebook);
+# the strategist chooses aspect ratio and length per platform. Kept as a Literal
+# (not a free string) so a brief can only name a platform the pipeline knows how
+# to render and publish.
+Platform = Literal["youtube_shorts", "instagram", "tiktok", "facebook"]
 
 # Canonical short-video aspect ratios the Assembly step supports (per DESIGN.md
 # stage 3): vertical, square, and landscape.
@@ -535,3 +536,123 @@ class PublishPlan(BaseModel):
         as :attr:`platforms`.
         """
         return tuple((platform, self.for_platform(platform)) for platform in self.platforms)
+
+
+class PostResult(BaseModel):
+    """The outcome of publishing a single :class:`ScheduledPost` (stage 6).
+
+    Produced by the Publisher for one scheduled post. It mirrors
+    :class:`ScheduledPost`'s attribution linkage -
+    ``clip_id``/``brief_id``/``trend_id`` plus ``platform`` and ``variant`` - so
+    a published (or failed) post can be traced all the way back to its clip,
+    brief, and originating trend by the future Performance Analyst / Learning
+    Store. It also carries the :attr:`idempotency_key` the Publisher derived for
+    this post, which the publisher-client uses to guarantee a post is not
+    published twice within a run.
+
+    On success :attr:`succeeded` is ``True`` and :attr:`post_id`,
+    :attr:`post_url`, and :attr:`published_at` (aware UTC) are set while
+    :attr:`error` is ``None``. On failure :attr:`succeeded` is ``False``,
+    :attr:`error` records the reason, and the success fields are ``None`` - the
+    Publisher records the failure and continues (one bad post never blocks the
+    run).
+
+    Frozen because a result is an immutable fact once recorded: results are
+    collected across concurrent per-platform publishers and must never be
+    mutated in place.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    clip_id: str = Field(description="ID of the published RenderedClip.")
+    brief_id: str = Field(description="ID of the originating ClipBrief.")
+    trend_id: str = Field(description="ID of the originating Trend, for attribution.")
+    platform: Platform = Field(description="Target short-video platform.")
+    variant: int = Field(
+        default=0,
+        ge=0,
+        description="Index of the A/B caption/hashtag variant (mirrors ScheduledPost.variant).",
+    )
+    idempotency_key: str = Field(
+        description="Stable key the Publisher derived for this post to prevent double-posting."
+    )
+    succeeded: bool = Field(description="Whether the post was published successfully.")
+    post_id: str | None = Field(
+        default=None,
+        description="Platform post id assigned on success; None on failure.",
+    )
+    post_url: str | None = Field(
+        default=None,
+        description="Platform post URL assigned on success; None on failure.",
+    )
+    error: str | None = Field(
+        default=None,
+        description="Failure reason; None on success.",
+    )
+    published_at: datetime | None = Field(
+        default=None,
+        description="Aware UTC time the post was published; None on failure.",
+    )
+
+
+class PostResults(BaseModel):
+    """The Publisher's output: the outcome of every scheduled post (stage 6).
+
+    Returned by the Publisher after it fans the run's :class:`PublishPlan` out
+    per platform (one Platform Publisher per platform, concurrent) and publishes
+    each platform's slice through the injected publisher-client. ``results``
+    holds every :class:`PostResult` in a single deterministic global order
+    (grouped by sorted platform, then scheduled order within a platform), so a
+    run is reproducible.
+
+    Mirrors :class:`PublishPlan`/:class:`QualityReport`: frozen, with ``__len__``
+    over the results and the same per-platform helpers (:attr:`platforms`,
+    :meth:`for_platform`, :meth:`slices`) so per-platform success/failure is
+    trivially inspectable. :attr:`succeeded`/:attr:`failed` split the results by
+    outcome, and :meth:`top` mirrors the other containers.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    run_id: str
+    results: tuple[PostResult, ...] = Field(default_factory=tuple)
+
+    def __len__(self) -> int:
+        return len(self.results)
+
+    @property
+    def platforms(self) -> tuple[Platform, ...]:
+        """Return the sorted tuple of distinct platforms present (deterministic)."""
+        return tuple(sorted({result.platform for result in self.results}))
+
+    def for_platform(self, platform: Platform) -> tuple[PostResult, ...]:
+        """Return ``platform``'s results in the deterministic global order.
+
+        Results are already stored grouped by sorted platform then scheduled
+        order, so filtering preserves that stable order.
+        """
+        return tuple(result for result in self.results if result.platform == platform)
+
+    def slices(self) -> tuple[tuple[Platform, tuple[PostResult, ...]], ...]:
+        """Return one ``(platform, results)`` pair per platform in sorted order.
+
+        Mirrors :meth:`PublishPlan.slices`: each pair carries a platform and its
+        results in the same deterministic order as :attr:`platforms`.
+        """
+        return tuple((platform, self.for_platform(platform)) for platform in self.platforms)
+
+    @property
+    def succeeded(self) -> tuple[PostResult, ...]:
+        """Return the results that published successfully, in global order."""
+        return tuple(result for result in self.results if result.succeeded)
+
+    @property
+    def failed(self) -> tuple[PostResult, ...]:
+        """Return the results that failed to publish, in global order."""
+        return tuple(result for result in self.results if not result.succeeded)
+
+    def top(self, n: int) -> tuple[PostResult, ...]:
+        """Return the first ``n`` results in the deterministic global order."""
+        if n < 0:
+            raise ValueError("n must be non-negative")
+        return self.results[:n]

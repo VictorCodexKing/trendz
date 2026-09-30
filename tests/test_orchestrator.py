@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import timedelta
 from typing import get_args
 
 import pytest
 
 from trendz.concurrency import bounded_map
-from trendz.contracts import Platform, PublishPlan, RunConfig
+from trendz.contracts import Platform, PostResults, RunConfig
 from trendz.orchestrator import Orchestrator
 from trendz.orchestrator import bounded_map as orchestrator_bounded_map
 from trendz.sources.mock_source import MockTrendSource
@@ -77,48 +76,66 @@ def test_orchestrator_reexports_bounded_map() -> None:
     assert orchestrator_bounded_map is bounded_map
 
 
-async def test_orchestrator_run_returns_publish_plan_by_platform() -> None:
-    """A full offline run (stages 1-5) returns a per-platform PublishPlan.
+async def test_orchestrator_run_returns_post_results_by_platform() -> None:
+    """A full offline run (stages 1-6) returns per-platform PostResults.
 
     Built with the MockTrendSource exactly as ``python -m trendz`` does, this
-    stays fully offline and deterministic. It asserts relative spacing and
-    ordering rather than absolute wall-clock times so it cannot be flaky.
+    stays fully offline and deterministic. It asserts per-platform partitioning
+    and attribution rather than absolute wall-clock times so it cannot be flaky.
     """
     config = RunConfig()
     orchestrator = Orchestrator(config=config, sources=[MockTrendSource()])
 
-    plan = await orchestrator.run()
+    results = await orchestrator.run()
 
-    assert isinstance(plan, PublishPlan)
-    # The plan is organized by platform, and every platform is a known one.
+    assert isinstance(results, PostResults)
+    # The results are organized by platform, and every platform is a known one.
     known_platforms = set(get_args(Platform))
-    assert set(plan.platforms) <= known_platforms
+    assert set(results.platforms) <= known_platforms
     # platforms is sorted and distinct.
-    assert list(plan.platforms) == sorted(set(plan.platforms))
+    assert list(results.platforms) == sorted(set(results.platforms))
 
     # slices() covers exactly the platforms property, in the same order, and
-    # every post routes to the platform it is filed under.
-    assert [platform for platform, _ in plan.slices()] == list(plan.platforms)
-    total_posts = 0
-    gap = timedelta(minutes=config.min_post_gap_minutes)
-    for platform, posts in plan.slices():
-        assert posts == plan.for_platform(platform)
-        assert all(post.platform == platform for post in posts)
-        total_posts += len(posts)
-        # Within a platform, posts are in scheduled order and respect spacing.
-        for earlier, later in zip(posts, posts[1:], strict=False):
-            assert later.scheduled_at >= earlier.scheduled_at
-            assert later.scheduled_at - earlier.scheduled_at >= gap
+    # every result routes to the platform it is filed under; each is attributed.
+    assert [platform for platform, _ in results.slices()] == list(results.platforms)
+    total = 0
+    for platform, platform_results in results.slices():
+        assert platform_results == results.for_platform(platform)
+        assert all(r.platform == platform for r in platform_results)
+        for result in platform_results:
+            assert result.clip_id
+            assert result.brief_id
+            assert result.trend_id
+            assert result.idempotency_key
+        total += len(platform_results)
 
-    # slices() partitions all posts with no leftovers.
-    assert total_posts == len(plan)
+    # slices() partitions all results with no leftovers, and succeeded/failed
+    # partition them too.
+    assert total == len(results)
+    assert len(results.succeeded) + len(results.failed) == len(results)
 
 
 async def test_orchestrator_run_is_deterministic() -> None:
-    """Two full offline runs with the same config produce equal plans (barring run id)."""
+    """Two full offline runs with the same config produce equal results (barring run id).
+
+    The Publisher derives each post's idempotency key (and thus its stub
+    post_id/post_url) from the run id, which is a fresh UUID per run, so those
+    fields legitimately differ between runs. Normalising the run id out shows the
+    rest of every result is byte-identical, proving the pipeline is deterministic.
+    """
     config = RunConfig()
     first = await Orchestrator(config=config, sources=[MockTrendSource()]).run()
     second = await Orchestrator(config=config, sources=[MockTrendSource()]).run()
 
-    # run_id differs per run; the scheduled posts must be identical.
-    assert first.posts == second.posts
+    def _normalise(results: PostResults) -> list[dict[str, object]]:
+        normalised: list[dict[str, object]] = []
+        for result in results.results:
+            data = result.model_dump()
+            for key in ("idempotency_key", "post_id", "post_url"):
+                value = data[key]
+                if isinstance(value, str):
+                    data[key] = value.replace(results.run_id, "<run_id>")
+            normalised.append(data)
+        return normalised
+
+    assert _normalise(first) == _normalise(second)
