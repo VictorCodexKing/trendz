@@ -16,7 +16,7 @@ Design choices:
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -101,6 +101,32 @@ class RunConfig(BaseModel):
             "as 'metrics collected as of published_at + dwell_hours' - it is a "
             "modelled collection offset, NOT a real sleep or wall-clock wait. "
             "0 means metrics are collected as of the publish time itself."
+        ),
+    )
+    learning_rate: float = Field(
+        default=0.2,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Fixed reinforcement-update step the Learning / Memory Store applies "
+            "when it retunes priors from measured performance: "
+            "new = old + learning_rate * (normalized_reward - old). A FIXED step "
+            "(not an adaptive schedule) so updates are deterministic and "
+            "reproducible. 0 means priors never move; 1 means each update jumps "
+            "straight to the observed target."
+        ),
+    )
+    exploration_epsilon: float = Field(
+        default=0.1,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Exploration probability for the Learning / Memory Store's "
+            "multi-armed-bandit format/timing allocation (epsilon-greedy). "
+            "Applied via a SEEDED, deterministic policy (a random.Random seeded "
+            "from the run id) so the explore/exploit allocation is reproducible. "
+            "0 means pure exploitation (always the best-known arm); higher values "
+            "explore more."
         ),
     )
 
@@ -813,3 +839,217 @@ class PerformanceReports(BaseModel):
             raise ValueError("n must be non-negative")
         ranked = sorted(self.reports, key=lambda report: report.performance_score, reverse=True)
         return tuple(ranked[:n])
+
+
+class TrendAggregate(BaseModel):
+    """A per-trend rollup of the observed performance for one originating trend (stage 8).
+
+    The Learning / Memory Store derives one of these per trend from
+    :meth:`PerformanceReports.by_trend`, folding every post attributed to a trend
+    into a single record: how many posts it produced, their total and mean
+    performance score, and the distinct platforms it was published to. These are
+    the attribution-keyed aggregates the reinforcement update reads to decide how
+    to nudge the tunable priors.
+
+    Frozen because an aggregate is an immutable fact once derived from a fixed
+    :class:`PerformanceReports`: the same reports always yield the same rollup.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    trend_id: str = Field(description="ID of the originating Trend the posts share.")
+    post_count: int = Field(ge=0, description="Number of posts attributed to this trend.")
+    total_performance_score: float = Field(
+        ge=0.0,
+        description="Sum of the per-post performance scores across the trend's posts.",
+    )
+    mean_performance_score: float = Field(
+        ge=0.0,
+        description="Mean per-post performance score (0.0 when the trend has no posts).",
+    )
+    platforms: tuple[Platform, ...] = Field(
+        default_factory=tuple,
+        description="Distinct platforms the trend was published to, in sorted order.",
+    )
+
+
+class BanditArm(BaseModel):
+    """A single multi-armed-bandit arm: one platform's observed reward + pull state (stage 8).
+
+    Each arm corresponds to a per-platform allocation choice the Learning /
+    Memory Store's epsilon-greedy policy can pull. It carries the arm's
+    incrementally-updated ``pulls`` count and ``estimated_reward`` (a running,
+    normalized estimate of that platform's performance). The bandit explores
+    (picks a random arm with probability ``exploration_epsilon``) or exploits
+    (picks the highest ``estimated_reward`` arm) using a SEEDED
+    :class:`random.Random`, so the allocation is reproducible.
+
+    Frozen because an arm is a snapshot of the persisted state at a given
+    version; a new update produces a new arm rather than mutating this one.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    platform: Platform = Field(description="The platform this arm allocates to.")
+    pulls: int = Field(ge=0, description="How many times this arm has been pulled/allocated.")
+    estimated_reward: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description="Running normalized reward estimate for this arm, in [0, 1].",
+    )
+
+
+class LearningState(BaseModel):
+    """The Learning / Memory Store's output: the updated, fed-back tunable priors (stage 8).
+
+    This is the loop-closer of the pipeline (DESIGN.md stage 8). It carries the
+    UPDATED tunable priors, shaped so they can be fed straight back into the
+    existing agents rather than living in a parallel vocabulary:
+
+        - :attr:`scoring_weights` mirrors Trend Scout's ``ScoringWeights`` (the
+          four floats velocity/relevance/shelf_life/saturation). Use
+          :meth:`as_scoring_weights` to rebuild a ``ScoringWeights`` for the
+          Trend Scout.
+        - :attr:`format_priors` are the Content Strategist's per-platform prior
+          weights, keyed by :data:`Platform` (its format/hook allocation signal).
+        - :attr:`engagement_threshold` is the Quality Gate's updated
+          minimum-engagement threshold.
+        - :attr:`timing_slots` mirrors the audience-timing provider's per-platform
+          ``tuple[int, ...]`` minute-of-day slot shape. Use
+          :meth:`as_timing_slots` to rebuild the provider's slot mapping.
+
+    It also carries the bandit allocation state (:attr:`arms`) and the
+    aggregation records it derived (:attr:`trend_aggregates`), plus ``run_id`` and
+    a monotonically-incrementing :attr:`version` / :attr:`updates_applied` counter
+    so 'improves over time' (incremental updates across runs against the same
+    store) is observable.
+
+    Frozen because a learning snapshot is an immutable fact once produced: a
+    subsequent update produces a NEW state with an incremented version rather
+    than mutating this one.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    run_id: str
+    version: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Monotonic version of the learned state. 0 is the initial/default "
+            "state; each applied (non-empty) update increments it."
+        ),
+    )
+    updates_applied: int = Field(
+        default=0,
+        ge=0,
+        description="Total number of non-empty updates folded into this state.",
+    )
+    scoring_weights: tuple[float, float, float, float] = Field(
+        default=(0.35, 0.35, 0.15, 0.15),
+        description=(
+            "Updated Trend Scout scoring weights as "
+            "(velocity, relevance, shelf_life, saturation), mirroring "
+            "ScoringWeights. Defaults match DEFAULT_WEIGHTS."
+        ),
+    )
+    format_priors: dict[Platform, float] = Field(
+        default_factory=dict,
+        description=(
+            "Updated Content Strategist per-platform format/hook prior weights, "
+            "keyed by Platform. Each is a normalized reward estimate in [0, 1]."
+        ),
+    )
+    engagement_threshold: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description="Updated Quality Gate minimum-engagement threshold, in [0, 1].",
+    )
+    timing_slots: dict[Platform, tuple[int, ...]] = Field(
+        default_factory=dict,
+        description=(
+            "Updated Scheduler per-platform best posting slots (minutes-of-day), "
+            "mirroring the audience-timing provider's tuple[int, ...] slot shape."
+        ),
+    )
+    arms: tuple[BanditArm, ...] = Field(
+        default_factory=tuple,
+        description="The multi-armed-bandit arm state (per-platform pulls + reward).",
+    )
+    trend_aggregates: tuple[TrendAggregate, ...] = Field(
+        default_factory=tuple,
+        description="The per-trend aggregation records this state was derived from.",
+    )
+
+    def as_scoring_weights(self) -> ScoringWeights:
+        """Rebuild a Trend Scout ``ScoringWeights`` from the learned weights.
+
+        Proves the feedback path is real: the learned four-float weight vector is
+        exactly the shape Trend Scout consumes, so a downstream run can be
+        re-seeded with the tuned weights. Imported lazily to keep
+        :mod:`trendz.contracts` free of an agent-module import cycle.
+        """
+        from trendz.agents.trend_scout import ScoringWeights
+
+        velocity, relevance, shelf_life, saturation = self.scoring_weights
+        return ScoringWeights(
+            velocity=velocity,
+            relevance=relevance,
+            shelf_life=shelf_life,
+            saturation=saturation,
+        )
+
+    def as_timing_slots(self) -> dict[Platform, tuple[int, ...]]:
+        """Return the per-platform timing slots as the provider's slot mapping.
+
+        A copy of :attr:`timing_slots` in exactly the
+        :class:`~trendz.timing.stub_provider.StubAudienceTimingProvider` ``slots``
+        shape, so the tuned timings can be injected back into the Scheduler's
+        timing provider.
+        """
+        return {platform: tuple(slots) for platform, slots in self.timing_slots.items()}
+
+    def arm_for(self, platform: Platform) -> BanditArm | None:
+        """Return the bandit arm for ``platform`` if present, else ``None``."""
+        for arm in self.arms:
+            if arm.platform == platform:
+                return arm
+        return None
+
+
+class RunResult(BaseModel):
+    """The Orchestrator's end-to-end run output bundle (stages 1-8).
+
+    A single frozen bundle returned by :meth:`~trendz.orchestrator.Orchestrator.run`
+    now that the pipeline is complete end to end. It carries:
+
+        - :attr:`run_id`: the run's unique id (the same one threaded through the
+          ``RunContext`` and stamped on every contract the run produced).
+        - :attr:`reports`: the Performance Analyst's :class:`PerformanceReports`
+          (stage 7) - the per-post metrics + score + attribution for every
+          successfully published post.
+        - :attr:`learnings`: the Learning / Memory Store's :class:`LearningState`
+          (stage 8) - the updated, fed-back tunable priors and bandit state.
+
+    Bundling both keeps the ``run()`` return type honest about the whole
+    pipeline: callers can inspect what was published *and* what the run learned,
+    and feed the learnings back into the next run's tunable configs.
+
+    Frozen because a run result is an immutable fact once the run completes.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    run_id: str
+    reports: PerformanceReports = Field(
+        description="The Performance Analyst's per-post reports (stage 7)."
+    )
+    learnings: LearningState = Field(
+        description="The Learning / Memory Store's updated tunable priors (stage 8)."
+    )
+
+
+if TYPE_CHECKING:  # pragma: no cover - typing-only import to avoid a cycle
+    from trendz.agents.trend_scout import ScoringWeights

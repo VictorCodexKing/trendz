@@ -7,8 +7,20 @@ from typing import get_args
 
 import pytest
 
+from trendz.agents.content_strategist import ContentStrategist
+from trendz.agents.quality_gate import QualityGate
+from trendz.agents.scheduler import Scheduler
+from trendz.agents.trend_scout import ScoringWeights, TrendScout
+from trendz.checkers.stub_checker import StubClipChecker
 from trendz.concurrency import bounded_map
-from trendz.contracts import PerformanceReports, Platform, RunConfig
+from trendz.contracts import (
+    LearningState,
+    PerformanceReports,
+    Platform,
+    RunConfig,
+    RunContext,
+    RunResult,
+)
 from trendz.orchestrator import Orchestrator
 from trendz.orchestrator import bounded_map as orchestrator_bounded_map
 from trendz.sources.mock_source import MockTrendSource
@@ -76,19 +88,40 @@ def test_orchestrator_reexports_bounded_map() -> None:
     assert orchestrator_bounded_map is bounded_map
 
 
-async def test_orchestrator_run_returns_performance_reports_by_platform() -> None:
-    """A full offline run (stages 1-7) returns per-platform PerformanceReports.
+async def test_orchestrator_run_returns_run_result_bundle() -> None:
+    """A full offline run (stages 1-8) returns a RunResult bundling reports + learnings.
 
     Built with the MockTrendSource exactly as ``python -m trendz`` does, this
-    stays fully offline and deterministic. It asserts per-platform partitioning
-    and attribution rather than absolute wall-clock times so it cannot be flaky.
+    stays fully offline and deterministic. It asserts the new return type carries
+    both the stage-7 PerformanceReports and the stage-8 LearningState (with the
+    priors updated away from their zeroed defaults and non-empty bandit state).
     """
     config = RunConfig()
     orchestrator = Orchestrator(config=config, sources=[MockTrendSource()])
 
-    reports = await orchestrator.run()
+    result = await orchestrator.run()
 
+    assert isinstance(result, RunResult)
+    assert result.run_id == result.reports.run_id == result.learnings.run_id
+
+    reports = result.reports
     assert isinstance(reports, PerformanceReports)
+
+    learnings = result.learnings
+    assert isinstance(learnings, LearningState)
+    # A non-empty run applied one update, so the version/counter advanced past
+    # the default state and the bandit + aggregates carry real state.
+    assert learnings.version == 1
+    assert learnings.updates_applied == 1
+    assert learnings.arms
+    assert learnings.trend_aggregates
+    # The learned scoring weights are a usable ScoringWeights and the timing
+    # hints are the provider's slot shape.
+    assert isinstance(learnings.as_scoring_weights(), ScoringWeights)
+    assert learnings.as_timing_slots()
+    # Format priors were nudged for every observed platform (off their 0.0 seed).
+    assert any(prior > 0.0 for prior in learnings.format_priors.values())
+
     # The reports are organized by platform, and every platform is a known one.
     known_platforms = set(get_args(Platform))
     assert set(reports.platforms) <= known_platforms
@@ -122,8 +155,8 @@ async def test_orchestrator_run_is_deterministic() -> None:
     rest of every report is byte-identical, proving the pipeline is deterministic.
     """
     config = RunConfig()
-    first = await Orchestrator(config=config, sources=[MockTrendSource()]).run()
-    second = await Orchestrator(config=config, sources=[MockTrendSource()]).run()
+    first = (await Orchestrator(config=config, sources=[MockTrendSource()]).run()).reports
+    second = (await Orchestrator(config=config, sources=[MockTrendSource()]).run()).reports
 
     def _normalise(reports: PerformanceReports) -> list[dict[str, object]]:
         # The stub post_id embeds the per-run idempotency key (which embeds the
@@ -145,3 +178,44 @@ async def test_orchestrator_run_is_deterministic() -> None:
         return normalised
 
     assert _normalise(first) == _normalise(second)
+
+
+async def test_orchestrator_feedback_path_maps_learnings_into_next_run_configs() -> None:
+    """The stage-8 learnings map back into the earlier agents' tunable configs.
+
+    Exercises ``Orchestrator.next_run_agents``: after a full offline run, the
+    produced LearningState is fed back into fresh agents/providers. This proves
+    the loop is closed - the learned ScoringWeights, timing slots, format priors,
+    and engagement threshold flow into real constructors the agents expose, not a
+    parallel/cosmetic shape.
+    """
+    config = RunConfig()
+    result = await Orchestrator(config=config, sources=[MockTrendSource()]).run()
+    learnings = result.learnings
+
+    trend_scout, content_strategist, quality_gate, scheduler = Orchestrator.next_run_agents(
+        learnings
+    )
+
+    # Each learning fed a real agent/provider that accepts it.
+    assert isinstance(trend_scout, TrendScout)
+    assert isinstance(content_strategist, ContentStrategist)
+    assert isinstance(quality_gate, QualityGate)
+    assert isinstance(scheduler, Scheduler)
+
+    # The Trend Scout is seeded with the learned weights (real ScoringWeights).
+    learned_weights = learnings.as_scoring_weights()
+    assert isinstance(learned_weights, ScoringWeights)
+    assert trend_scout._weights == learned_weights
+
+    # The Scheduler's timing provider carries the learned per-platform slots.
+    learned_slots = learnings.as_timing_slots()
+    ctx = RunContext.new(run_id="feedback-test", config=config)
+    for platform, slots in learned_slots.items():
+        assert scheduler._provider.optimal_minutes_of_day(ctx, platform) == slots
+
+    # The Quality Gate's checker is seeded with the learned engagement threshold
+    # on its REAL engagement gate (min_engagement_score), not the duration floor.
+    checker = quality_gate._checker
+    assert isinstance(checker, StubClipChecker)
+    assert checker._min_engagement_score == learnings.engagement_threshold

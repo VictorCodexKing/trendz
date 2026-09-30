@@ -3,7 +3,14 @@
 from __future__ import annotations
 
 from trendz.agents.trend_scout import TrendScout, score_trend
-from trendz.contracts import PerformanceReports, RunConfig, RunContext, Trend, TrendList
+from trendz.contracts import (
+    PerformanceReports,
+    RunConfig,
+    RunContext,
+    RunResult,
+    Trend,
+    TrendList,
+)
 from trendz.orchestrator import Orchestrator
 from trendz.sources.mock_source import MockTrendSource
 
@@ -115,13 +122,16 @@ async def test_no_sources_yields_empty_trend_list(ctx: RunContext) -> None:
 
 
 async def test_orchestrator_runs_pipeline_end_to_end() -> None:
-    """The Orchestrator run() drives Trend Scout -> ... -> Performance Analyst."""
+    """The Orchestrator run() drives Trend Scout -> ... -> Learning / Memory Store."""
     config = RunConfig()
     orchestrator = Orchestrator(config=config, sources=[MockTrendSource()])
 
-    result = await orchestrator.run()
+    run_result = await orchestrator.run()
 
-    # The pipeline now yields the Performance Analyst's PerformanceReports (stage 7).
+    # The pipeline now returns a RunResult bundle (stages 1-8); its ``reports``
+    # field carries the Performance Analyst's PerformanceReports (stage 7).
+    assert isinstance(run_result, RunResult)
+    result = run_result.reports
     assert isinstance(result, PerformanceReports)
     # The Content Strategist admits trends on whole-trend boundaries: with four
     # configured platforms and the default target_clip_count of 5, only the first

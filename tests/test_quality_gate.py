@@ -129,6 +129,40 @@ async def test_reject_budget_exceeding_retries_is_dropped() -> None:
     assert report.dropped[0].brief_id == "b0"
 
 
+async def test_engagement_threshold_gates_approval() -> None:
+    """The learned engagement threshold produces a behavioral difference in approvals.
+
+    Two clips with differing predicted-engagement scores are gated by a
+    ``min_engagement_score``: the high-engagement clip is approved while the
+    low-engagement one is rejected on the engagement dimension - proving the
+    engagement bar (not the technical duration floor) drives approval.
+    """
+    config = RunConfig(max_quality_retries=0)
+    ctx = RunContext.new(run_id="engagement-run", config=config)
+    # StubClipChecker._engagement_score = ((duration*37 + 11) % 100) / 100.
+    #   duration 2  -> (74 + 11) % 100 = 85 -> 0.85 (high engagement)
+    #   duration 30 -> (1110 + 11) % 100 = 21 -> 0.21 (low engagement)
+    high = _clip(0, duration_seconds=2)
+    low = _clip(1, duration_seconds=30)
+    clips = RenderedClipSet(run_id=ctx.run_id, clips=(high, low))
+
+    # With no engagement gate (default 0.0) both clips pass.
+    open_gate = QualityGate(checker=StubClipChecker())
+    open_report = await open_gate.run(ctx, clips, briefs=_brief_list(ctx.run_id, 2))
+    assert {c.brief_id for c in open_report.approved} == {"b0", "b1"}
+    assert open_report.dropped == ()
+
+    # Raising the engagement bar to 0.5 rejects the low-engagement clip only.
+    gated = QualityGate(checker=StubClipChecker(min_engagement_score=0.5))
+    gated_report = await gated.run(ctx, clips, briefs=_brief_list(ctx.run_id, 2))
+    assert [c.brief_id for c in gated_report.approved] == ["b0"]
+    assert len(gated_report.dropped) == 1
+    dropped = gated_report.dropped[0]
+    assert dropped.brief_id == "b1"
+    assert dropped.approved is False
+    assert any("engagement" in reason for reason in dropped.reasons)
+
+
 async def test_empty_clip_set_yields_empty_report(ctx: RunContext) -> None:
     """An empty RenderedClipSet yields an empty QualityReport without work."""
     gate = QualityGate(checker=StubClipChecker())

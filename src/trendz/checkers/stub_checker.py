@@ -11,7 +11,10 @@ keys. It models DESIGN.md stage 4's three check families deterministically:
     - Content safety: a clip is unsafe iff its ``brief_id`` is listed in
       ``reject_brief_ids`` (a stand-in for brand-safety / licensing / policy).
     - Predicted engagement: a deterministic score derived from the clip's
-      duration, hashed into ``[0, 1]``.
+      duration, hashed into ``[0, 1]``. When a ``min_engagement_score`` is
+      configured, a clip scoring below it FAILS the engagement check and is
+      rejected - this is the real engagement bar the Learning / Memory Store's
+      learned engagement threshold feeds (a threshold of 0.0 disables gating).
 
 To let tests force approve, force reject, and (crucially) reject-then-approve on
 re-render within the retry bound, the safety check consults an optional
@@ -38,6 +41,7 @@ class StubClipChecker(ClipChecker):
         reject_budget: dict[str, int] | None = None,
         min_duration_seconds: int = 1,
         max_duration_seconds: int = 180,
+        min_engagement_score: float = 0.0,
     ) -> None:
         """Create the checker.
 
@@ -50,12 +54,20 @@ class StubClipChecker(ClipChecker):
                 Lets a re-render within the retry bound deterministically pass.
             min_duration_seconds: Minimum acceptable clip duration (technical).
             max_duration_seconds: Maximum acceptable clip duration (technical).
+            min_engagement_score: Minimum predicted-engagement score in [0, 1] a
+                clip must meet to pass the ENGAGEMENT check. This is the real
+                engagement bar (distinct from the technical duration floor): a
+                clip whose ``engagement_score`` is below it is rejected. Defaults
+                to 0.0 (no engagement gating), so existing behaviour is
+                unchanged unless a threshold is supplied - this is the knob the
+                Learning / Memory Store's learned engagement threshold feeds.
         """
         self._reject_brief_ids = reject_brief_ids or frozenset()
         # Copied so the caller's mapping is not mutated as budgets are consumed.
         self._reject_budget = dict(reject_budget) if reject_budget else {}
         self._min_duration_seconds = min_duration_seconds
         self._max_duration_seconds = max_duration_seconds
+        self._min_engagement_score = min_engagement_score
 
     @property
     def name(self) -> str:
@@ -102,13 +114,26 @@ class StubClipChecker(ClipChecker):
             safety_ok = False
             reasons.append("safety: pending re-render (rejection budget not yet exhausted)")
 
+        # Predicted-engagement gate: a clip whose engagement score falls below
+        # the configured minimum fails the ENGAGEMENT check (distinct from the
+        # technical and safety checks). With the default threshold of 0.0 this
+        # never rejects; a learned/raised threshold makes the engagement bar
+        # actually gate approval.
+        engagement_score = self._engagement_score(clip)
+        engagement_ok = engagement_score >= self._min_engagement_score
+        if not engagement_ok:
+            reasons.append(
+                "engagement: predicted engagement "
+                f"{engagement_score:.2f} below minimum {self._min_engagement_score:.2f}"
+            )
+
         return ClipVerdict(
             clip_id=clip.id,
             brief_id=clip.brief_id,
             trend_id=clip.trend_id,
-            approved=technical_ok and safety_ok,
+            approved=technical_ok and safety_ok and engagement_ok,
             reasons=tuple(reasons),
-            engagement_score=self._engagement_score(clip),
+            engagement_score=engagement_score,
             technical_ok=technical_ok,
             safety_ok=safety_ok,
         )
