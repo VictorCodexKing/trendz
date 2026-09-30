@@ -5,13 +5,15 @@ The Orchestrator owns the run lifecycle: it builds a
 dispatches work to agents, and (eventually) enforces concurrency limits, retries,
 timeouts, and budget guards.
 
-Today it implements the first six stages: Trend Scout -> Content Strategist ->
-Clip Factory -> Quality & Safety Gate -> Scheduler & Optimizer -> Publisher,
-returning the Publisher's :class:`~trendz.contracts.PostResults`. The Clip
-Factory is the fan-out/concurrency core, mapping a Clip Worker over the briefs
-through ``bounded_map``; the Quality Gate fans out the same way, one evaluation
-per clip; the Publisher fans out per platform over the ``PublishPlan``'s slices.
-The remaining stages (7+) are present as clearly-marked TODO scaffolding so the
+Today it implements the first seven stages: Trend Scout -> Content Strategist ->
+Clip Factory -> Quality & Safety Gate -> Scheduler & Optimizer -> Publisher ->
+Performance Analyst, returning the Analyst's
+:class:`~trendz.contracts.PerformanceReports`. The Clip Factory is the
+fan-out/concurrency core, mapping a Clip Worker over the briefs through
+``bounded_map``; the Quality Gate fans out the same way, one evaluation per clip;
+the Publisher fans out per platform over the ``PublishPlan``'s slices; the
+Performance Analyst fans out per post over the ``PostResults``' succeeded posts.
+The remaining stages (8+) are present as clearly-marked TODO scaffolding so the
 module boundaries and the fan-out/concurrency model from the design are visible
 and ready to fill in.
 """
@@ -24,12 +26,13 @@ import structlog
 
 from trendz.agents.clip_factory import ClipFactory
 from trendz.agents.content_strategist import ContentStrategist
+from trendz.agents.performance_analyst import PerformanceAnalyst
 from trendz.agents.publisher import Publisher
 from trendz.agents.quality_gate import QualityGate
 from trendz.agents.scheduler import Scheduler
 from trendz.agents.trend_scout import TrendScout
 from trendz.concurrency import bounded_map
-from trendz.contracts import PostResults, RunConfig, RunContext
+from trendz.contracts import PerformanceReports, RunConfig, RunContext
 from trendz.sources.base import TrendSource
 
 # Re-exported so callers and downstream stages can reach the bounded worker pool
@@ -42,11 +45,11 @@ log = structlog.get_logger(component="orchestrator")
 class Orchestrator:
     """Builds the run context and drives the pipeline stages.
 
-    Stages 1-6 (Trend Scout, Content Strategist, Clip Factory, Quality & Safety
-    Gate, Scheduler & Optimizer, Publisher) are wired up and threaded the same
-    ``RunContext``, and :meth:`run` returns the Publisher's ``PostResults``.
-    Downstream stages are stubbed below with the intended data flow and fan-out
-    points documented.
+    Stages 1-7 (Trend Scout, Content Strategist, Clip Factory, Quality & Safety
+    Gate, Scheduler & Optimizer, Publisher, Performance Analyst) are wired up and
+    threaded the same ``RunContext``, and :meth:`run` returns the Analyst's
+    ``PerformanceReports``. Downstream stages are stubbed below with the intended
+    data flow and fan-out points documented.
     """
 
     def __init__(self, config: RunConfig, sources: list[TrendSource]) -> None:
@@ -64,18 +67,23 @@ class Orchestrator:
         # Stage 6: publishes the PublishPlan per platform through the default
         # injected (deterministic offline) publisher-client.
         self._publisher = Publisher()
+        # Stage 7: collects each succeeded post's metrics through the default
+        # injected (deterministic offline) metrics-provider and attributes the
+        # outcome back to its clip/brief/trend.
+        self._analyst = PerformanceAnalyst()
 
     def _new_context(self) -> RunContext:
         """Create a fresh run context with a unique run id."""
         return RunContext.new(run_id=str(uuid.uuid4()), config=self._config)
 
-    async def run(self) -> PostResults:
+    async def run(self) -> PerformanceReports:
         """Execute the pipeline.
 
-        Today this runs stages 1-6 and returns the Publisher's ``PostResults``
-        (the outcome of publishing each scheduled post per platform). As
-        downstream agents land, each stage below is unstubbed and chained on,
-        threading the same ``RunContext`` through.
+        Today this runs stages 1-7 and returns the Performance Analyst's
+        ``PerformanceReports`` (the per-post metrics + score + attribution for
+        every successfully published post). As downstream agents land, each stage
+        below is unstubbed and chained on, threading the same ``RunContext``
+        through.
         """
         ctx = self._new_context()
         log.info("run_start", run_id=ctx.run_id, target_clips=self._config.target_clip_count)
@@ -151,13 +159,29 @@ class Orchestrator:
             platform_count=len(results.platforms),
         )
 
+        # Stage 7: Performance Analyst -> PerformanceReports. Fans out per post
+        # over the succeeded posts (``results.succeeded``) through ``bounded_map``
+        # capped at ``self._config.concurrency_degree`` - one metric-collection
+        # task per post, concurrent. Each post's metrics are collected through
+        # the injected metrics-provider "as of" published_at + dwell_hours (a
+        # deterministic offset, not a real wait), a per-post score is derived,
+        # and the outcome is attributed back to its clip/brief/trend. Failed
+        # posts are excluded from collection.
+        reports = await self._analyst.run(ctx, results)
+        log.info(
+            "analyst_done",
+            run_id=ctx.run_id,
+            report_count=len(reports),
+            platform_count=len(reports.platforms),
+            excluded_failures=len(results.failed),
+        )
+
         # ------------------------------------------------------------------
         # TODO: remaining pipeline stages (see docs/DESIGN.md). Each stage is an
         # agent subclassing BaseAgent, threaded the same RunContext. The fan-out
         # stages use ``bounded_map`` (from trendz.concurrency) to cap concurrency
         # at ``self._config.concurrency_degree``.
         #
-        #   reports  = await Analyst(...).run(ctx, results)      # -> PerformanceReports
         #   await LearningStore(...).run(ctx, reports)  # updates weights/priors
         #
         # TODO: run lifecycle concerns to add here as well: retries with
@@ -169,9 +193,7 @@ class Orchestrator:
         log.info(
             "run_complete",
             run_id=ctx.run_id,
-            post_count=len(results),
-            succeeded_count=len(results.succeeded),
-            failed_count=len(results.failed),
-            platform_count=len(results.platforms),
+            report_count=len(reports),
+            platform_count=len(reports.platforms),
         )
-        return results
+        return reports
