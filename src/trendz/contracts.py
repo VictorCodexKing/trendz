@@ -63,6 +63,15 @@ class RunConfig(BaseModel):
         ge=0,
         description="Total external API call quota for the run.",
     )
+    max_quality_retries: int = Field(
+        default=2,
+        ge=0,
+        description=(
+            "How many times the Quality & Safety Gate may re-render a rejected "
+            "clip before dropping it. 0 means no retries: a rejected clip is "
+            "dropped-and-logged immediately."
+        ),
+    )
 
 
 class BudgetLedger(BaseModel):
@@ -324,3 +333,85 @@ class RenderedClipSet(BaseModel):
         if n < 0:
             raise ValueError("n must be non-negative")
         return self.clips[:n]
+
+
+class ClipVerdict(BaseModel):
+    """The Quality & Safety Gate's evaluation of a single rendered clip.
+
+    Produced by a :class:`~trendz.checkers.base.ClipChecker` for one
+    :class:`RenderedClip`, this captures DESIGN.md stage 4's per-clip decision:
+    the ``technical_ok`` (resolution/audio/no black frames/length),
+    ``safety_ok`` (brand safety, copyright/music licensing, platform policy),
+    and ``engagement_score`` (the predicted-engagement signal) sub-checks, rolled
+    up into a single ``approved`` flag. ``reasons`` records the human-readable
+    rejection/safety reasons (empty when approved); the design notes these feed
+    the future Performance Analyst / Learning Store as failure-learning signal.
+
+    ``clip_id``/``brief_id``/``trend_id`` carry the same linkage the evaluated
+    clip does so a verdict can be traced back to its clip, brief, and trend.
+
+    Frozen because a verdict is an immutable fact once decided: the gate collects
+    verdicts across concurrent tasks and must never mutate them.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    clip_id: str = Field(description="ID of the evaluated RenderedClip.")
+    brief_id: str = Field(description="ID of the originating ClipBrief.")
+    trend_id: str = Field(description="ID of the originating Trend, for attribution.")
+    approved: bool = Field(description="Whether the clip passed the gate.")
+    reasons: tuple[str, ...] = Field(
+        default_factory=tuple,
+        description="Rejection/safety reasons; empty when approved.",
+    )
+    engagement_score: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description="Predicted-engagement score in [0, 1].",
+    )
+    technical_ok: bool = Field(
+        default=True,
+        description="Technical checks passed (resolution, audio, no black frames, length).",
+    )
+    safety_ok: bool = Field(
+        default=True,
+        description="Content-safety checks passed (brand safety, licensing, platform policy).",
+    )
+
+
+class QualityReport(BaseModel):
+    """The Quality & Safety Gate's output: approved clips plus rejection signal.
+
+    Returned by the gate after evaluating every :class:`RenderedClip` (fanning a
+    :class:`~trendz.checkers.base.ClipChecker` out through
+    :func:`~trendz.concurrency.bounded_map`). ``approved`` holds the clips that
+    passed and flow on toward the Scheduler; ``dropped`` holds the verdicts of
+    clips that failed the gate even after their bounded re-render retries were
+    exhausted (or errored). The dropped verdicts carry their reasons for
+    observability - DESIGN.md notes these become failure-learning signal for the
+    future Performance Analyst / Learning Store.
+
+    Mirrors :class:`RenderedClipSet`/:class:`ClipBriefList`: frozen, with
+    ``__len__`` (over the approved clips) and a :meth:`top` helper. Approved
+    order mirrors the input clip order because the fan-out routes through
+    :func:`~trendz.concurrency.bounded_map`, which preserves input order.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    run_id: str
+    approved: tuple[RenderedClip, ...] = Field(default_factory=tuple)
+    dropped: tuple[ClipVerdict, ...] = Field(
+        default_factory=tuple,
+        description="Verdicts of clips dropped after exhausting retries or erroring.",
+    )
+
+    def __len__(self) -> int:
+        return len(self.approved)
+
+    def top(self, n: int) -> tuple[RenderedClip, ...]:
+        """Return the first ``n`` approved clips in order."""
+        if n < 0:
+            raise ValueError("n must be non-negative")
+        return self.approved[:n]
